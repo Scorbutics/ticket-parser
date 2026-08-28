@@ -1,0 +1,31 @@
+{
+  "manifest_version": 3,
+  "name": "ticket-parser scraper",
+  "version": "0.1.0",
+  "description": "Read the open WhatsApp Web conversation and export it for ticket-parser. Reads only; never sends anything.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "ticket-parser@scorbutics.local",
+      "strict_min_version": "115.0"
+    },
+    "gecko_android": {
+      "strict_min_version": "120.0"
+    }
+  },
+  "permissions": ["downloads", "storage"],
+  "host_permissions": ["*://web.whatsapp.com/*"],
+  "action": {
+    "default_title": "Export this conversation",
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "scripts": ["background.js"]
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://web.whatsapp.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

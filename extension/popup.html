@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<style>
+  body {
+    font: 13px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif;
+    width: 300px;
+    margin: 0;
+    padding: 14px;
+    color: #1a1a1a;
+  }
+  h1 { font-size: 14px; margin: 0 0 4px; }
+  .sub { color: #6b7280; font-size: 11.5px; margin-bottom: 12px; }
+  label { display: block; margin-bottom: 10px; }
+  input[type="number"] { width: 60px; }
+  button {
+    width: 100%; padding: 9px; font-size: 13px; font-weight: 600;
+    background: #2563eb; color: #fff; border: 0; border-radius: 4px;
+    cursor: pointer; margin-bottom: 6px;
+  }
+  button.secondary { background: #4b5563; }
+  button:disabled { background: #9ca3af; cursor: default; }
+  #delivery { display: none; margin-top: 10px; padding-top: 10px; border-top: 1px solid #e5e7eb; }
+  #status {
+    margin-top: 12px; font-size: 11.5px; color: #374151;
+    white-space: pre-wrap; max-height: 150px; overflow-y: auto;
+  }
+  #status.error { color: #b91c1c; }
+  .hint { margin-top: 10px; font-size: 11px; color: #6b7280; }
+  code { background: #f3f4f6; padding: 1px 3px; border-radius: 2px; }
+</style>
+</head>
+<body>
+  <h1>Export this conversation</h1>
+  <div class="sub">Reads the open chat. Never sends anything on its own.</div>
+
+  <label>
+    Scroll back
+    <input type="number" id="scrollbacks" value="5" min="0" max="200">
+    times before reading
+  </label>
+
+  <label>
+    <input type="checkbox" id="includeOwn">
+    include messages I sent
+  </label>
+
+  <button id="run">Read conversation</button>
+
+  <div id="delivery">
+    <button id="save">Save bundle to Downloads</button>
+    <button id="share" class="secondary">Send bundle…</button>
+    <div class="hint">
+      On the phone, <em>Send</em> opens the share sheet — pick your mail app and
+      send it to the address <code>ticket-parser</code> watches.
+    </div>
+  </div>
+
+  <div id="status"></div>
+  <div class="hint" id="footer">
+    Desktop: files land in <code>Downloads/ticket-parser/</code>, then run
+    <code>ticket-parser import</code>.
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

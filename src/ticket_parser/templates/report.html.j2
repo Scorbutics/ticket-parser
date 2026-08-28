@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Bug report {{ batch.batch_id }}</title>
+<style>
+  /* Restyle freely -- no Python touches this file. */
+  @page { size: A4; margin: 16mm 14mm; }
+
+  :root {
+    --ink: #1a1a1a;
+    --muted: #6b7280;
+    --rule: #e5e7eb;
+    --bubble: #f3f4f6;
+    --accent: #2563eb;
+    --confirmed: #b91c1c;
+    --notfound: #047857;
+    --inconclusive: #b45309;
+  }
+
+  body {
+    font: 11pt/1.55 -apple-system, "Segoe UI", Roboto, "Noto Sans", sans-serif;
+    color: var(--ink);
+    margin: 0;
+  }
+
+  .page { page-break-after: always; }
+  .page:last-child { page-break-after: auto; }
+
+  header.cover { border-bottom: 2px solid var(--ink); padding-bottom: 10mm; margin-bottom: 8mm; }
+  header.cover h1 { font-size: 22pt; margin: 0 0 2mm; }
+  header.cover .meta { color: var(--muted); font-size: 10pt; }
+
+  .toc { margin-top: 8mm; }
+  .toc li { margin-bottom: 2mm; }
+  .toc .cat { color: var(--muted); font-size: 9.5pt; }
+
+  .banner {
+    background: #fef3c7; border-left: 4px solid #d97706;
+    padding: 3mm 4mm; margin: 4mm 0; font-size: 9.5pt;
+  }
+  .banner ul { margin: 1mm 0 0; padding-left: 5mm; }
+
+  h2.issue-title { font-size: 16pt; margin: 0 0 2mm; }
+
+  .tags { margin-bottom: 5mm; font-size: 9pt; }
+  .tag {
+    display: inline-block; padding: 0.8mm 2.4mm; border-radius: 3px;
+    background: var(--bubble); color: var(--muted); margin-right: 2mm;
+    text-transform: uppercase; letter-spacing: 0.04em;
+  }
+  .tag.sev-high, .tag.sev-critical { background: #fee2e2; color: #991b1b; }
+  .tag.sev-medium { background: #fef3c7; color: #92400e; }
+
+  .msg { margin: 0 0 4mm; padding-left: 3mm; border-left: 2px solid var(--rule); }
+  .msg .who { font-size: 8.5pt; color: var(--muted); margin-bottom: 1mm; }
+  /* Message text: rendered verbatim from the parsed data, never from a model. */
+  .msg .body { white-space: pre-wrap; word-wrap: break-word; }
+  .msg img { max-width: 78mm; max-height: 105mm; margin-top: 2mm; border: 1px solid var(--rule); border-radius: 3px; }
+  .msg .missing { font-size: 9pt; color: var(--muted); font-style: italic; }
+  .msg .voice-label { font-size: 9pt; color: var(--muted); margin-top: 1mm; }
+  .msg .transcript { margin-top: 1mm; padding: 2mm 3mm; background: var(--bubble); border-radius: 3px; }
+
+  .verdict { margin-top: 7mm; padding-top: 4mm; border-top: 1px solid var(--rule); font-size: 10pt; }
+  .verdict h3 { font-size: 10.5pt; margin: 0 0 2mm; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+  .verdict .headline { font-weight: 600; margin-bottom: 2mm; }
+  .verdict .headline.confirmed { color: var(--confirmed); }
+  .verdict .headline.not_found { color: var(--notfound); }
+  .verdict .headline.inconclusive { color: var(--inconclusive); }
+  .verdict .fix { margin-top: 3mm; }
+  .verdict .fix strong { color: var(--accent); }
+  .verdict ul.evidence { margin: 2mm 0 0; padding-left: 5mm; font-size: 9pt; color: var(--muted); }
+  .verdict code { font-family: "JetBrains Mono", Menlo, monospace; font-size: 8.5pt; }
+  .verdict .disclaimer { margin-top: 3mm; font-size: 8.5pt; color: var(--muted); font-style: italic; }
+</style>
+</head>
+<body>
+
+<section class="page">
+  <header class="cover">
+    <h1>Bug report</h1>
+    <div class="meta">
+      {{ batch.batch_id }}
+      {%- if batch.started_at %} &middot; {{ batch.started_at.strftime('%d/%m/%Y %H:%M') }}
+        &ndash; {{ batch.ended_at.strftime('%H:%M') }}{% endif %}
+      &middot; {{ batch.messages|length }} message{{ '' if batch.messages|length == 1 else 's' }}
+      &middot; {{ batch.issues|length }} issue{{ '' if batch.issues|length == 1 else 's' }}
+    </div>
+  </header>
+
+  {% if batch.warnings %}
+  <div class="banner">
+    <strong>Run warnings</strong>
+    <ul>{% for warning in batch.warnings %}<li>{{ warning }}</li>{% endfor %}</ul>
+  </div>
+  {% endif %}
+
+  <div class="toc">
+    <ol>
+      {% for issue in batch.issues %}
+      <li>
+        {{ issue.title }}<br>
+        <span class="cat">{{ issue.category }} &middot; severity {{ issue.severity }}
+        {%- if issue.verdict.ran %} &middot; {{ issue.verdict.label|lower }}{% endif %}</span>
+      </li>
+      {% endfor %}
+    </ol>
+  </div>
+</section>
+
+{% for issue in batch.issues %}
+<section class="page">
+  <h2 class="issue-title">{{ loop.index }}. {{ issue.title }}</h2>
+  <div class="tags">
+    <span class="tag">{{ issue.category }}</span>
+    <span class="tag sev-{{ issue.severity }}">severity {{ issue.severity }}</span>
+    {% if issue.started_at %}<span class="tag">{{ issue.started_at.strftime('%d/%m/%Y %H:%M') }}</span>{% endif %}
+  </div>
+
+  {% for message in issue.messages %}
+  <div class="msg">
+    <div class="who">{{ message.author_name }} &middot; {{ message.display_time }}</div>
+    {% if message.text %}<div class="body">{{ message.text }}</div>{% endif %}
+    {% if message.media and message.media.is_audio %}
+      <div class="voice-label">🎤 Voice message</div>
+      {% if message.transcript %}<div class="body transcript">{{ message.transcript }}</div>
+      {% elif message.transcript_error %}<div class="missing">[{{ message.transcript_error }}]</div>
+      {% endif %}
+    {% elif message.media %}
+      {% set uri = data_uris.get(message.media.filename) %}
+      {% if uri %}<img src="{{ uri }}" alt="{{ message.media.filename }}">
+      {% else %}<div class="missing">[attachment not rendered: {{ message.media.filename }}]</div>{% endif %}
+    {% elif message.document_name %}
+      <div class="missing">[document attached: <strong>{{ message.document_name }}</strong> — download it from WhatsApp if you need it]</div>
+    {% elif message.media_error %}
+      <div class="missing">[a screenshot was sent here but could not be retrieved: {{ message.media_error }}]</div>
+    {% endif %}
+  </div>
+  {% endfor %}
+
+  {% if issue.verdict.ran %}
+  <div class="verdict">
+    <h3>Checked against the code</h3>
+    <div class="headline {{ issue.verdict.verdict }}">
+      {{ issue.verdict.label }}{% if issue.verdict.confidence %} &middot; {{ issue.verdict.confidence }} confidence{% endif %}
+    </div>
+    {% if issue.verdict.observations %}<p>{{ issue.verdict.observations }}</p>{% endif %}
+    {% if issue.verdict.suggested_fix %}
+    <p class="fix"><strong>Suggested fix.</strong> {{ issue.verdict.suggested_fix }}</p>
+    {% endif %}
+    {% if issue.verdict.evidence %}
+    <ul class="evidence">
+      {% for item in issue.verdict.evidence %}
+      <li><code>{{ item.location }}</code>{% if item.note %} &mdash; {{ item.note }}{% endif %}</li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+    <div class="disclaimer">
+      Automated analysis against {{ issue.verdict.repo_head[:8] or 'unknown' }}. Verify before acting.
+    </div>
+  </div>
+  {% endif %}
+</section>
+{% endfor %}
+
+</body>
+</html>
