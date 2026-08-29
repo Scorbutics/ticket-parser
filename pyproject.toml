@@ -26,6 +26,11 @@ dev = [
 # the transcribe stage just leaves voice notes untranscribed.
 transcribe = [
     "faster-whisper==1.0.3",
+    # faster-whisper 1.0.3 imports requests without declaring it as a
+    # dependency (a bug in its own packaging) -- pinned explicitly so
+    # installing this extra doesn't silently leave the transcribe stage
+    # broken with an ImportError that looks like faster-whisper is missing.
+    "requests==2.34.2",
 ]
 
 [project.scripts]

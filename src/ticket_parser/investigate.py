@@ -19,7 +19,7 @@ from typing import Callable
 
 from . import db
 from .claude_cli import REPO_READONLY_TOOLS, ClaudeError, ClaudeRunner, extract_json
-from .models import Batch, Evidence, Issue, RepoVerdict
+from .models import Batch, ChatMessage, Evidence, Issue, RepoVerdict
 
 log = logging.getLogger(__name__)
 
@@ -32,7 +32,8 @@ Issue: {title}
 Category: {category}
 Reported severity: {severity}
 
-What they said, verbatim:
+What they said, verbatim (a line marked "voice transcript" is an automated \
+transcription of a voice note and may contain transcription errors):
 {quotes}
 
 Investigate whether this problem plausibly exists in this codebase as \
@@ -73,9 +74,17 @@ def repo_head(repo_path: Path) -> str:
         return "unknown"
 
 
+def _quote_body(message: ChatMessage) -> str:
+    if message.text:
+        return message.text
+    if message.transcript:
+        return f"(voice transcript) {message.transcript}"
+    return ""
+
+
 def build_prompt(issue: Issue) -> str:
     quotes = "\n".join(
-        f"  [{message.display_time}] {message.author_name}: {message.text}"
+        f"  [{message.display_time}] {message.author_name}: {_quote_body(message)}"
         + (f"  (screenshot: {message.media.filename})" if message.media else "")
         for message in issue.messages
     )

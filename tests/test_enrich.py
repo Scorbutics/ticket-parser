@@ -22,6 +22,23 @@ def make_batch(*texts: str) -> Batch:
     return Batch(batch_id="test", messages=messages)
 
 
+def test_build_prompt_includes_a_voice_notes_transcript() -> None:
+    message = ChatMessage(
+        seq=1,
+        wa_id="msg1",
+        chat_id="chat",
+        author_name="Product Owner",
+        timestamp=1_700_000_000,
+        text="",
+        transcript="the export button crashes the whole app",
+    )
+
+    prompt = enrich.build_prompt([message])
+
+    assert "the export button crashes the whole app" in prompt
+    assert "voice transcript" in prompt
+
+
 def test_clusters_messages_into_issues() -> None:
     batch = make_batch("login fails", "here is the screen", "cart total is wrong")
     runner = FakeClaudeRunner(

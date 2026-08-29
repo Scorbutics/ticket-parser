@@ -28,7 +28,9 @@ product owner. Below are the messages, each with a stable integer id.
 Group them into distinct issues. Messages about the same problem belong to the \
 same issue, including follow-ups and screenshots that illustrate it. A message \
 that is pure chatter with no bug content belongs to no issue and should simply \
-be omitted from your grouping.
+be omitted from your grouping. A voice note is shown as its transcript, marked \
+"(voice transcript, may contain errors)" -- treat it the same as typed text \
+when judging what the message is about.
 
 Reply with JSON only. No prose, no code fence. Schema:
 
@@ -56,7 +58,11 @@ def _render_messages(messages: list[ChatMessage]) -> str:
     lines = []
     for message in messages:
         marker = f" [attachment: {message.media.filename}]" if message.media else ""
-        text = message.text.strip() or "(no text)"
+        text = message.text.strip()
+        if not text and message.transcript:
+            text = f"(voice transcript, may contain errors) {message.transcript}"
+        elif not text:
+            text = "(no text)"
         lines.append(f"[{message.seq}] {message.author_name}: {text}{marker}")
     return "\n".join(lines)
 

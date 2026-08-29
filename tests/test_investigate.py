@@ -39,6 +39,24 @@ def make_batch() -> Batch:
     return Batch(batch_id="test", messages=[message], issues=[issue])
 
 
+def test_build_prompt_includes_a_voice_notes_transcript() -> None:
+    message = ChatMessage(
+        seq=1,
+        wa_id="msg1",
+        chat_id="chat",
+        author_name="Product Owner",
+        timestamp=1_700_000_000,
+        text="",
+        transcript="the export button crashes the whole app",
+    )
+    issue = Issue(key="issue-1", title="Export crash", category="ui", messages=[message])
+
+    prompt = investigate.build_prompt(issue)
+
+    assert "the export button crashes the whole app" in prompt
+    assert "voice transcript" in prompt
+
+
 def test_verdict_is_parsed_onto_the_issue(conn, tmp_path: Path) -> None:
     batch = make_batch()
     runner = FakeClaudeRunner(replies=[VERDICT])
