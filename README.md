@@ -120,6 +120,40 @@ The popup reports which route was used.
 Only images WhatsApp has actually **rendered** exist in the page, so scroll
 through the pictures you want before exporting.
 
+**Voice notes** have no `<audio>` element in the page at all, played or not,
+and WhatsApp never runs a received one through `AudioContext.decodeAudioData`
+either — that path exists in their code, but only for a voice note *you* are
+about to send, to draw its waveform before upload. A *received* note's
+waveform arrives as data already computed on the sender's device.
+
+What does happen, confirmed by watching it live: scrolling a voice note into
+view makes WhatsApp create a `URL.createObjectURL(blob)` for its decrypted
+audio — a completely standard Web API, not a WhatsApp internal. `extension/
+page-hook.js` runs in the page's own JS realm (a `"world": "MAIN"` content
+script — this is why the extension requires Firefox 128+) and hooks that call
+to capture every audio-typed blob it sees. Nothing in the DOM ties a captured
+blob back to the row it came from, so page-hook.js decodes each one itself
+(its own decode of bytes already in hand, independent of whatever WhatsApp
+does or doesn't do with it) purely to read its duration, and content.js
+matches that against the duration WhatsApp displays on each row's progress
+slider (`aria-valuetext="0:00/1:26"`). Like images, only a voice note
+WhatsApp has actually loaded into the page exists to capture, so scroll
+through the conversation before exporting. If a voice note's duration can't
+be matched to anything captured, it's flagged with an error on its own report
+page rather than silently rendered as empty.
+
+Getting page-hook.js to run at all took two false starts worth knowing about
+if this ever needs touching again: a `<script src="moz-extension://...">` tag
+inserted from content.js doesn't work — WhatsApp's CSP requires a per-page
+nonce on every script, which a DOM-inserted tag doesn't have, and a
+`"world": "MAIN"` content script (injected by the browser itself, exempt from
+the page's CSP) was needed instead. And reaching into WhatsApp's own internal
+module loader (`window.require('WAWebCollections').Msg...`, the technique
+`whatsapp-web.js` uses) was tried before `createObjectURL` and abandoned:
+it's exactly the category of internal, unversioned dependency this extension
+otherwise avoids, and it didn't even resolve messages on the version of
+WhatsApp Web this was tested against.
+
 **Documents** (`.docx`, `.pdf`, `.xlsx`, …) cannot be extracted: WhatsApp only
 decrypts them when you click download, so there is nothing in the page to read.
 They are detected by filename and named on the page — *"document attached:
@@ -146,10 +180,33 @@ matches, open the chat, press F12 and run:
 console.log('rows:', document.querySelectorAll('[data-id]').length);
 console.log('with metadata:', document.querySelectorAll('[data-pre-plain-text]').length);
 console.log('blob images:', document.querySelectorAll('img[src^="blob:"]').length);
+console.log('voice sliders currently mounted:', document.querySelectorAll('[role="slider"]').length);
+console.log('audio captured so far:', JSON.parse(window.wrappedJSObject.__ticketParserAudioLogJSON || '[]').length);
 ```
 
 Non-zero row and image counts mean the scrape is fixable by adjusting that block
 alone.
+
+For voice notes specifically, `page-hook.js` logs its own status under the
+`[ticket-parser]` prefix — reload the tab after any extension change (the hook
+only installs at page load) and check the console for
+`[ticket-parser] voice-note capture (createObjectURL hook) ready`, then for a
+`captured voice note: Ns ...` line per note as you scroll. If those lines never
+show up, the hook isn't seeing WhatsApp's `createObjectURL` calls at all —
+check for a CSP error in the console first (see the "Voice notes" section
+above for why that already broke one earlier approach).
+
+If audio *is* captured but voice notes still come back unmatched, note that
+`voice sliders currently mounted` in the snippet above is near-meaningless on
+its own: WhatsApp's chat list is virtualized, so a row's progress bar (and its
+`aria-valuetext` duration) only exists in the DOM while that row is near the
+viewport, and loadHistory() ends with the conversation scrolled to the very
+top — by then almost every voice note it scrolled past has lost that markup
+again. `content.js` handles this by recording each duration the moment a row
+is briefly mounted, during the scroll itself (`captureVoiceNoteDurations`),
+not by re-reading the DOM afterward — so a mismatch here more likely means a
+duration was read as slightly different text than what the captured audio
+decoded to (a rounding difference, most likely) than a mounting problem.
 
 ### Hands-off mode
 
