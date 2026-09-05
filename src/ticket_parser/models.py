@@ -64,7 +64,11 @@ class ChatMessage:
             str(self.timestamp),
             self.author_name,
             self.text,
-            self.media.filename if self.media else "",
+            # Documents carry no Media (WhatsApp only decrypts on click), so
+            # fall back to the filename -- otherwise two documents sent in the
+            # same minute with no caption fingerprint identically and the
+            # second is silently dropped as already-seen.
+            self.media.filename if self.media else self.document_name,
         )
 
 

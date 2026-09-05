@@ -63,3 +63,23 @@ def test_verdict_cache_roundtrip(conn) -> None:
 
     assert db.cache_get(conn, "k1") == '{"verdict": "confirmed"}'
     assert db.cache_get(conn, "missing") is None
+
+
+def test_two_documents_in_the_same_minute_are_not_the_same_line() -> None:
+    """A document carries no Media, so its name is the only thing telling two
+    uncaptioned attachments apart. Without it the second is dropped as seen."""
+    from ticket_parser.models import ChatMessage
+
+    def doc(name: str) -> ChatMessage:
+        return ChatMessage(
+            seq=0,
+            wa_id="",
+            chat_id="",
+            author_name="Owner",
+            timestamp=1773047880,
+            text="",
+            document_name=name,
+        )
+
+    assert doc("specs-1926.docx").fingerprint() != doc("specs-3926.docx").fingerprint()
+    assert doc("specs-1926.docx").fingerprint() == doc("specs-1926.docx").fingerprint()
