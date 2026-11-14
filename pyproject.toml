@@ -13,6 +13,9 @@ dependencies = [
     "playwright==1.47.0",
     "pillow==10.4.0",
     "pillow-heif==0.18.0",
+    # Text of PDFs found on disk (`documents` / `import`), when the browser
+    # extension could not include them. Pure Python.
+    "pypdf==5.1.0",
 ]
 # No WhatsApp chat-log parser: the sidecar delivers structured messages, so
 # there is no `_chat.txt` to parse and no locale-dependent timestamp regex.

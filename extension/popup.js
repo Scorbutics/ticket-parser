@@ -1,140 +1,235 @@
 'use strict';
 
+/**
+ * A view over the export job, which runs in background.js.
+ *
+ * The popup is destroyed whenever it loses focus, so it holds nothing that
+ * matters: reopening it asks the background for the current state (a read in
+ * progress, or the last finished export) and carries on from there.
+ *
+ * What needs attention is shown as alerts (#notices: the job's errors,
+ * warnings and result; #toasts: outcomes of clicks here, like a save). The
+ * raw progress log stays available under "Details".
+ */
+
 const statusEl = document.getElementById('status');
+const detailsEl = document.getElementById('details');
+const noticesEl = document.getElementById('notices');
+const toastsEl = document.getElementById('toasts');
+const lastEl = document.getElementById('last');
 const runButton = document.getElementById('run');
 const saveButton = document.getElementById('save');
 const shareButton = document.getElementById('share');
+const saveZipButton = document.getElementById('saveZip');
 const deliveryEl = document.getElementById('delivery');
+const includeOwnEl = document.getElementById('includeOwn');
 
-// Held between the read and the send, because navigator.share must be called
-// from a fresh click: awaiting a 90-second scrape burns the user activation
-// that the share sheet requires. Hence two steps rather than one button.
-let bundle = null;
+const OPTIONS_KEY = 'popupOptions';
+const ICONS = { error: '⛔', warning: '⚠️', info: 'ℹ️', success: '✅', progress: '⏳' };
 
-function show(text, isError = false) {
-  statusEl.textContent = text;
-  statusEl.className = isError ? 'error' : '';
+// navigator.share must be called straight from a click, so the zip is fetched
+// from the background ahead of time, as soon as an export is known to exist.
+let shareFile = null; // File, for lastExport.name
+let shareFileName = '';
+let lastStatus = '';
+let latestLine = '';
+
+function noticeElement({ level, title, detail }, onClose) {
+  const box = document.createElement('div');
+  box.className = `notice ${level}`;
+  box.setAttribute('role', level === 'error' ? 'alert' : 'status');
+
+  const icon = document.createElement('span');
+  icon.className = 'icon';
+  icon.textContent = ICONS[level] || '';
+  box.append(icon);
+
+  const text = document.createElement('div');
+  text.className = 'text';
+  const strong = document.createElement('strong');
+  strong.textContent = title;
+  text.append(strong);
+  if (detail) text.append(document.createTextNode(detail));
+  box.append(text);
+
+  if (onClose) {
+    const close = document.createElement('button');
+    close.className = 'close';
+    close.title = 'Dismiss';
+    close.textContent = '×';
+    close.addEventListener('click', onClose);
+    box.append(close);
+  }
+  return box;
 }
 
-function append(text) {
+/** A transient alert for something done from this popup. */
+function toast(level, title, detail = '') {
+  const box = noticeElement({ level, title, detail }, () => box.remove());
+  toastsEl.append(box);
+  if (level === 'success' || level === 'info') setTimeout(() => box.remove(), 6000);
+}
+
+function setLog(lines) {
+  statusEl.textContent = lines.join('\n');
+  statusEl.scrollTop = statusEl.scrollHeight;
+}
+
+function appendLog(text) {
   statusEl.textContent += (statusEl.textContent ? '\n' : '') + text;
+  statusEl.scrollTop = statusEl.scrollHeight;
+  latestLine = text;
+  const progress = noticesEl.querySelector('.notice.progress .text');
+  if (progress) progress.lastChild.textContent = text;
+}
+
+function timeOf(ms) {
+  const d = new Date(ms);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${pad(d.getDate())}/${pad(d.getMonth() + 1)} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+async function prefetchShareFile(name) {
+  if (shareFileName === name) return;
+  shareFileName = name;
+  shareFile = null;
+  const result = await browser.runtime.sendMessage({ command: 'get-export-zip' });
+  if (result && result.ok && result.name === name) {
+    const bytes = Uint8Array.from(atob(result.base64), (c) => c.charCodeAt(0));
+    shareFile = new File([bytes], `${name}.zip`, { type: 'application/zip' });
+  }
+}
+
+function renderNotices(state) {
+  noticesEl.replaceChildren();
+  const add = (notice) => noticesEl.append(noticeElement(notice));
+
+  if (state.status === 'running') {
+    add({ level: 'progress', title: 'Reading…', detail: latestLine || 'Starting.' });
+    return;
+  }
+  if (state.status === 'error' || state.status === 'interrupted') {
+    add({
+      level: 'error',
+      title: state.status === 'interrupted' ? 'Read interrupted' : 'Read failed',
+      detail:
+        state.error +
+        (state.lastExport ? ' Your previous export below is unaffected.' : ''),
+    });
+    return;
+  }
+  if (state.status === 'done') {
+    const notices = state.notices || [];
+    const order = { error: 0, warning: 1, info: 2 };
+    if (!notices.some((n) => n.level === 'error')) {
+      add({ level: 'success', title: 'Export ready', detail: state.summary || '' });
+    }
+    [...notices].sort((a, b) => (order[a.level] ?? 3) - (order[b.level] ?? 3)).forEach(add);
+  }
+}
+
+function render(state) {
+  const running = state.status === 'running';
+  runButton.disabled = running;
+  runButton.textContent = running ? 'Reading…' : 'Read conversation';
+
+  const log = state.log || [];
+  latestLine = log[log.length - 1] || '';
+  setLog(log);
+  renderNotices(state);
+
+  // The log is the detail, not the message: open while a read runs, folded
+  // once it is over -- but only on a change, so a toggle by hand sticks.
+  if (state.status !== lastStatus) detailsEl.open = running;
+  lastStatus = state.status;
+  detailsEl.style.display = log.length ? '' : 'none';
+
+  const last = state.lastExport;
+  if (last) {
+    lastEl.textContent =
+      `Last export: ${last.messageCount} message(s), ${last.fileCount - 1} file(s) — ${timeOf(last.finishedAt)}` +
+      (running ? ' (kept until this read finishes)' : '');
+    lastEl.title = last.name;
+    lastEl.style.display = 'block';
+    deliveryEl.style.display = 'block';
+    prefetchShareFile(last.name).catch(() => {});
+  } else {
+    lastEl.style.display = 'none';
+    deliveryEl.style.display = 'none';
+  }
 }
 
 browser.runtime.onMessage.addListener((request) => {
-  if (request.command === 'progress') append(request.text);
+  if (request.command === 'job-log') appendLog(request.line);
+  if (request.command === 'job-state') render(request.state);
 });
 
-async function gzip(text) {
-  const stream = new Blob([text]).stream().pipeThrough(new CompressionStream('gzip'));
-  return await new Response(stream).blob();
-}
-
-async function blobToBase64(blob) {
-  const buffer = new Uint8Array(await blob.arrayBuffer());
-  let binary = '';
-  const CHUNK = 0x8000;
-  for (let i = 0; i < buffer.length; i += CHUNK) {
-    binary += String.fromCharCode.apply(null, buffer.subarray(i, i + CHUNK));
+async function restore() {
+  try {
+    const options = (await browser.storage.local.get(OPTIONS_KEY))[OPTIONS_KEY];
+    if (options) includeOwnEl.checked = Boolean(options.includeOwn);
+  } catch (err) {
+    // Options are a convenience; the defaults in popup.html are fine.
   }
-  return btoa(binary);
-}
-
-function bundleName(messages) {
-  const stamps = messages.map((m) => m.timestamp).filter(Boolean);
-  const when = stamps.length ? new Date(Math.min(...stamps) * 1000) : new Date();
-  const pad = (n) => String(n).padStart(2, '0');
-  return (
-    `whatsapp-${when.getFullYear()}${pad(when.getMonth() + 1)}${pad(when.getDate())}` +
-    `T${pad(when.getHours())}${pad(when.getMinutes())}.json.gz`
-  );
+  render(await browser.runtime.sendMessage({ command: 'get-export-state' }));
 }
 
 runButton.addEventListener('click', async () => {
+  toastsEl.replaceChildren();
+  const options = { includeOwn: includeOwnEl.checked };
+  browser.storage.local.set({ [OPTIONS_KEY]: options }).catch(() => {});
+
+  const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
+  if (!tab || !/^https:\/\/web\.whatsapp\.com/.test(tab.url || '')) {
+    toast('error', 'Not on WhatsApp Web', 'Open web.whatsapp.com in this tab first.');
+    return;
+  }
+
   runButton.disabled = true;
-  deliveryEl.style.display = 'none';
-  bundle = null;
-  show('Reading the conversation…');
-
-  try {
-    const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
-    if (!tab || !/^https:\/\/web\.whatsapp\.com/.test(tab.url || '')) {
-      show('Open web.whatsapp.com in this tab first.', true);
-      return;
-    }
-
-    const scraped = await browser.tabs.sendMessage(tab.id, {
-      command: 'scrape',
-      scrollbacks: Number(document.getElementById('scrollbacks').value) || 0,
-      includeOwn: document.getElementById('includeOwn').checked,
-    });
-
-    if (!scraped || !scraped.ok) {
-      show(scraped ? scraped.error : 'No response from the page.', true);
-      return;
-    }
-
-    const payload = {
-      schema: 1,
-      source: 'firefox-extension',
-      exported_at: Math.floor(Date.now() / 1000),
-      message_count: scraped.messages.length,
-      messages: scraped.messages,
-    };
-    const blob = await gzip(JSON.stringify(payload));
-    bundle = { blob, filename: bundleName(scraped.messages) };
-
-    append(
-      `bundled ${scraped.messages.length} messages → ${bundle.filename} ` +
-        `(${(blob.size / 1024).toFixed(0)} KB)`
-    );
-    deliveryEl.style.display = 'block';
-  } catch (err) {
-    show(String(err && err.message ? err.message : err), true);
-  } finally {
+  const started = await browser.runtime.sendMessage({ command: 'start-export', tabId: tab.id, options });
+  if (!started || !started.ok) {
+    toast('error', 'Could not start', started ? started.error : 'The extension did not respond.');
     runButton.disabled = false;
   }
+  // From here on, progress arrives as job-log / job-state messages. Closing
+  // the popup does not stop the read.
 });
 
-saveButton.addEventListener('click', async () => {
-  if (!bundle) return;
-  saveButton.disabled = true;
+async function save(button, zip) {
+  button.disabled = true;
   try {
-    const result = await browser.runtime.sendMessage({
-      command: 'export-bundle',
-      base64: await blobToBase64(bundle.blob),
-      filename: bundle.filename,
-    });
-    if (result && result.ok) {
-      append(`saved to Downloads/ticket-parser/${bundle.filename}`);
-    } else {
-      append(`save failed: ${result ? result.error : 'no response'}`);
-    }
+    const result = await browser.runtime.sendMessage({ command: 'save-export', zip });
+    if (result && result.ok) toast('success', 'Saved', result.message.replace(/^saved to /, ''));
+    else toast('error', 'Save failed', result ? result.error : 'The extension did not respond.');
   } finally {
-    saveButton.disabled = false;
+    button.disabled = false;
   }
-});
+}
+
+saveButton.addEventListener('click', () => save(saveButton, false));
+saveZipButton.addEventListener('click', () => save(saveZipButton, true));
 
 shareButton.addEventListener('click', async () => {
-  if (!bundle) return;
-  const file = new File([bundle.blob], bundle.filename, { type: 'application/gzip' });
-
-  if (!navigator.canShare || !navigator.canShare({ files: [file] })) {
-    append(
-      'This browser will not share files. Use "Save bundle" instead, then ' +
-        'attach it to an email yourself.'
-    );
+  if (!shareFile) {
+    toast('info', 'Still preparing the .zip', 'Try again in a second.');
+    return;
+  }
+  if (!navigator.canShare || !navigator.canShare({ files: [shareFile] })) {
+    toast('warning', 'Sharing files is not supported here', 'Use "Save as .zip", then attach it to an email yourself.');
     return;
   }
 
   try {
     await navigator.share({
-      files: [file],
+      files: [shareFile],
       title: 'WhatsApp bug reports',
-      text: bundle.filename,
+      text: shareFile.name,
     });
-    append('handed to the share sheet');
+    toast('success', 'Handed to the share sheet');
   } catch (err) {
     const message = String(err && err.message ? err.message : err);
-    if (!/abort/i.test(message)) append(`share failed: ${message}`);
+    if (!/abort/i.test(message)) toast('error', 'Share failed', message);
   }
 });
+
+restore().catch((err) => toast('error', 'Popup error', String(err && err.message ? err.message : err)));

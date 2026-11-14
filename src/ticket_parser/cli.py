@@ -76,7 +76,13 @@ def build_parser() -> argparse.ArgumentParser:
         dest="drop_dir",
         default=None,
         metavar="PATH",
-        help="drop directory (default: DROP_DIR, or ~/Downloads/ticket-parser)",
+        help="drop directory, one export folder, a conversation.md or a .zip "
+        "(default: DROP_DIR, or ~/Downloads/ticket-parser)",
+    )
+    imp.add_argument(
+        "--include-drafts",
+        action="store_true",
+        help="also import Markdown exports still marked 'status: draft'",
     )
     imp.add_argument(
         "--then-run",
@@ -101,6 +107,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--then-run",
         action="store_true",
         help="import and render immediately afterwards",
+    )
+
+    docs = sub.add_parser(
+        "documents",
+        help="fill documents an export lacks (not downloaded in WhatsApp) from Downloads",
+    )
+    docs.add_argument("export", metavar="EXPORT", help="export folder or its conversation.md")
+    docs.add_argument(
+        "--search",
+        action="append",
+        metavar="DIR",
+        help="folder to look in (repeatable; default: DOCUMENT_SEARCH_DIRS, or ~/Downloads)",
     )
 
     sub.add_parser("status", help="show what is pending and what is ready")
@@ -179,7 +197,16 @@ def cmd_import(args: argparse.Namespace) -> int:
     config, storage = _context(args)
     drop_dir = Path(args.drop_dir).expanduser() if args.drop_dir else config.drop_dir
 
-    imported, skipped = collect.import_drop(storage, drop_dir)
+    # Scanning the drop folder skips Markdown exports still marked draft (you
+    # may be editing them, and this also runs from cron). Pointing --from at
+    # one export is deliberate, so that one is taken as-is.
+    imported, skipped = collect.import_path(
+        storage,
+        drop_dir,
+        include_drafts=args.include_drafts,
+        document_dirs=config.document_dirs,
+        exclude=(config.drop_dir,),
+    )
     print(f"imported {imported} message(s) from {drop_dir}")
     if skipped:
         print(f"  {skipped} already present, left alone")
@@ -221,7 +248,15 @@ def watch_tick(
             log.error("mailbox poll failed", extra={"error": str(exc)})
 
     if config.drop_dir.is_dir():
-        imported, _ = collect.import_drop(storage, config.drop_dir)
+        # Markdown exports start as drafts so you can edit them; only the ones
+        # marked `status: ready` are picked up here.
+        imported, _ = collect.import_drop(
+            storage,
+            config.drop_dir,
+            include_drafts=False,
+            document_dirs=config.document_dirs,
+            exclude=(config.drop_dir,),
+        )
         if imported:
             log.info("imported from drop", extra={"count": imported})
 
@@ -289,7 +324,13 @@ def cmd_mail(args: argparse.Namespace) -> int:
     if report.bundles and args.then_run:
         args.force = True
         args.html = None
-        collect.import_drop(storage, config.drop_dir)
+        collect.import_drop(
+            storage,
+            config.drop_dir,
+            include_drafts=False,
+            document_dirs=config.document_dirs,
+            exclude=(config.drop_dir,),
+        )
         return cmd_run(args)
 
     return 1 if report.errors else 0
@@ -327,6 +368,31 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_documents(args: argparse.Namespace) -> int:
+    """Fill missing documents into an export in place, without importing it."""
+    from pathlib import Path
+
+    from . import markdown_export
+
+    config, _ = _context(args)
+    target = Path(args.export).expanduser()
+    md_path = target if target.is_file() else markdown_export.find_conversation(target)
+    if md_path is None:
+        print(f"no conversation.md found at {target}")
+        return 1
+    dirs = tuple(Path(d).expanduser() for d in args.search) if args.search else config.document_dirs
+    report = markdown_export.fill_missing_documents(md_path, dirs, exclude=(config.drop_dir,))
+    for name in report.filled:
+        print(f"  + {name} (text included)")
+    for name in report.no_text:
+        print(f"  + {name} (linked; no readable text)")
+    for name in report.not_found:
+        print(f"  ! {name} not found in {', '.join(str(d) for d in dirs)}")
+    if not (report.filled or report.no_text or report.not_found):
+        print("nothing missing in this export")
+    return 1 if report.not_found else 0
+
+
 def cmd_prune(args: argparse.Namespace) -> int:
     config, storage = _context(args)
     removed = storage.prune_done(config.retention_days)
@@ -343,6 +409,7 @@ COMMANDS = {
     "mail": cmd_mail,
     "status": cmd_status,
     "prune": cmd_prune,
+    "documents": cmd_documents,
 }
 
 

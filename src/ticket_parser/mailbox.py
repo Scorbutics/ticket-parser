@@ -29,7 +29,7 @@ from .storage import safe_filename, write_atomic
 
 log = logging.getLogger(__name__)
 
-BUNDLE_SUFFIXES = (".json.gz", ".json")
+BUNDLE_SUFFIXES = (".json.gz", ".json", ".zip")
 
 
 @dataclass

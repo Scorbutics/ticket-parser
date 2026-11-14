@@ -19,24 +19,31 @@ conversation             into     quiet-    cluster   confront the   one issue
 ```
 
 1. **extension** — you open your product owner's chat in Firefox and click
-   *Export*. It scrolls back, reads the rendered messages, pulls the screenshots
-   and voice notes straight out of the page, and writes one directory per
+   *Read conversation*. It scrolls through the range you marked, reads the
+   rendered messages, pulls the screenshots,
+   voice notes and downloaded documents straight out of the page, and writes an
+   editable `conversation.md` plus a `media/` folder.
+2. **edit** (optional) — drop messages, fix text, add `> Note:` comments, then
+   mark it `status: ready`.
+3. **import** — reads the Markdown back into `data/inbox/`, one directory per
    message.
-2. **import** — lifts those into `data/inbox/`.
-3. **collect** — messages accumulate; a burst closes into a batch once the chat
-   has been silent for `QUIET_PERIOD_SECONDS` (default 2 h).
-4. **transcribe** — every voice note in the batch is run through a local,
+4. **collect** — messages accumulate; a burst closes into a batch once the chat
+   has been silent for `QUIET_PERIOD_SECONDS` (default 2 h). Each attached
+   document's text is cut into parts (at headings, list items, paragraphs)
+   that are grouped like messages, so one issue can mix chat messages with
+   the document passages about the same problem.
+5. **transcribe** — every voice note in the batch is run through a local,
    offline Whisper model (`faster-whisper`, no API key). The transcript is
    written back into the message's directory alongside the audio before
    anything else happens, so it survives crash recovery and is never
    recomputed on a re-run.
-5. **enrich** — one `claude` call groups the messages into distinct issues and
+6. **enrich** — one `claude` call groups the messages into distinct issues and
    labels each with a title, category and severity. **Metadata only** — see
    *Verbatim* below.
-6. **investigate** — one `claude` call per issue, run inside `REPO_PATH` with a
+7. **investigate** — one `claude` call per issue, run inside `REPO_PATH` with a
    read-only tool allowlist, producing a verdict, cited `file:line` evidence and
    a suggested fix.
-7. **render** — Jinja2 → Chromium. One page per issue: title, tags, the messages
+8. **render** — Jinja2 → Chromium. One page per issue: title, tags, the messages
    verbatim with their screenshots and voice-note transcripts, and the code
    verdict at the bottom.
 
@@ -83,19 +90,62 @@ or sign it through addons.mozilla.org if you want it permanent.
 
 ## Usage
 
-Open your product owner's chat, click the extension button, choose how far to
-scroll back, hit **Export**. Then:
+Open your product owner's chat and mark the range to export. In WhatsApp, open
+the chat menu → *Select messages*, then tick the **first** and the **last**
+message of the range. Click the extension button, hit **Read conversation**, then
+**Save to Downloads**.
+
+The extension starts at the bottom of the chat and scrolls up until it has
+passed both ticks, wherever you had scrolled to. It exports everything between
+them, both included. It never clicks or changes the selection. If more than
+two messages are ticked, the range runs from the oldest tick to the newest.
+WhatsApp only keeps ~100 messages loaded at a time, so the order is rebuilt by
+stitching overlapping scans together rather than trusted to timestamps.
+Messages below the range are skipped without reading their screenshots. Your
+own messages are included only with *include messages I sent*.
+
+Saving writes
+`Downloads/ticket-parser/whatsapp-<date>-exported-<date>/`:
+
+```
+conversation.md     one "## <time> · <sender>" section per message
+media/              the screenshots, voice notes and documents it links to
+```
+
+The read runs in the extension's background, not in the popup, so clicking
+away (which closes the popup) does not lose it. Reopen the popup to see its
+progress, or the **last export**, which is kept in extension storage until the
+next read finishes. It survives a Firefox restart, and a failed read never
+replaces it, so you can save it again at any time.
+
+Edit `conversation.md` as much as you like. It is also a good input for any
+other agent you want to run over the conversation.
+
+- **Drop a message:** delete its whole section.
+- **Fix or trim text:** edit the text under the heading.
+- **Comment:** add a `> Note: …` blockquote inside a message. Notes are kept
+  apart from what was said, passed to both LLM passes, and shown on the PDF
+  page.
+- **Free-standing remark:** a `## ` section of your own becomes a note on the
+  message above it.
+- **Trim a document:** edit inside its ```` ```document ```` fence.
+- Keep each `<!-- msg {…} -->` line: it is how a section is matched back to its
+  message (id, date, sender).
+
+Then change `status: draft` to `status: ready` at the top and run:
 
 ```bash
 ticket-parser import --then-run
 ```
 
-That imports what the extension wrote, closes the batch, and renders the PDF in
-one step. `ticket-parser import` alone stages the messages and leaves the
-report for later.
+That imports what is ready, closes the batch, and renders the PDF in one step.
+Drafts in the drop folder are left alone (so `watch` and cron never grab a file
+you are still editing). `ticket-parser import --from <export folder>` takes that
+one export as-is, and `--include-drafts` takes every draft.
 
-Re-exporting the same conversation is safe at three levels: the extension writes
-one directory per message id, `import` skips ids already present, and messages
+Re-exporting the same conversation is safe at three levels: each export gets
+its own folder (named with the export time, so it never overwrites one you are
+editing), `import` skips ids already present, and messages
 already triaged in an earlier report are filtered out by content fingerprint. You
 cannot double-report a bug.
 
@@ -154,21 +204,49 @@ it's exactly the category of internal, unversioned dependency this extension
 otherwise avoids, and it didn't even resolve messages on the version of
 WhatsApp Web this was tested against.
 
-**Documents** (`.docx`, `.pdf`, `.xlsx`, …) cannot be extracted: WhatsApp only
-decrypts them when you click download, so there is nothing in the page to read.
-They are detected by filename and named on the page — *"document attached:
-cahier-des-charges.docx"* — plus flagged on the cover, so you know one exists
-and can fetch it by hand. A message with a document is never rendered as if it
-were empty.
+**Documents** (`.docx`, `.pdf`, …): WhatsApp only decrypts a document when you
+click its download, so **click download on each document you want included,
+in the same tab, before reading**. `page-hook.js` catches the decrypted file as
+WhatsApp hands it to the browser. The extension still never clicks anything
+itself. The file is saved under `media/`, and its text goes into the Markdown:
+
+- **Word (.docx):** paragraphs, list items and table rows, read directly.
+- **PDF:** the text layer, via a vendored pdf.js (`extension/vendor/`,
+  Apache-2.0). There is no OCR: a scanned PDF has no text, so only the file is
+  linked.
+- **.txt/.csv/.md:** as-is. Other types (old `.doc`, spreadsheets) are linked
+  but not read.
+
+A document that was not downloaded in that tab is still detected, by its "3
+pages • DOCX • 689 kB" line, and named with a ⚠️ saying its contents are
+missing. A page reload throws WhatsApp's decrypted copy away, and an extension
+may not read files from disk, so this happens. But if you downloaded the
+document at some point, it is in your Downloads folder, and `ticket-parser`
+fills it in from there. It matches on the name (a prefix when WhatsApp truncated
+it, ignoring a browser's " (1)"), then the type and displayed size. It copies
+the file into the export's `media/` and writes its text in, exactly as the
+extension would have:
+
+```bash
+ticket-parser documents ~/Downloads/ticket-parser/whatsapp-…/   # fill in place, before you edit
+```
+
+`ticket-parser import` does the same automatically before importing. It
+searches `DOCUMENT_SEARCH_DIRS` (default `~/Downloads`, two levels deep,
+skipping the drop folder). PDFs found this way are read with `pypdf`, text
+layer only. Captured
+files are paired with their message by name, or by type and size when WhatsApp
+truncates the name.
 
 ### Timestamps
 
 Text messages carry `data-pre-plain-text` (`[19:08, 13/08/2026] Brice:`), so
 their time and sender are read directly. **Media rows do not** — they show only
-a bare `19:08`. For those, the date is carried forward from the previous message
-and combined with the visible time, then flagged: the report says how many
-timestamps were inferred, and warns that a date may be wrong across a midnight
-boundary.
+a bare `19:08`. For those, the date is taken from the dated messages directly
+above and below in the chat (picking the right side when the day changes in
+between), combined with the visible time, then flagged: the report says how
+many timestamps were inferred. A media message with no dated neighbour it can
+be placed against is left as *date unknown* rather than guessed.
 
 ### If a scrape comes back empty
 
@@ -260,8 +338,9 @@ npx web-ext sign --channel=unlisted --source-dir=extension \
 Firefox Android only installs Mozilla-signed extensions, so the unsigned build
 is desktop-only. On the phone, open WhatsApp Web with *Request desktop site*
 (link with a phone-number code rather than a QR, since you cannot scan your own
-screen), read the conversation, then **Send bundle…** and share it to your mail
-app.
+screen), read the conversation, then **Send .zip…** and share it to your mail
+app. A `.zip` is transport, so it is imported whatever its status says. Unzip it
+first if you want to edit it.
 
 To collect those, point the mailbox settings at the address you send to and set
 `MAIL_ENABLED=true`. Then `watch` polls it each cycle, or fetch on demand:
@@ -277,15 +356,17 @@ and `Message-ID` dedupe means re-polling is a no-op.
 
 ```bash
 ticket-parser watch                  # poll drop folder (+ mailbox), render as batches close
-ticket-parser mail                   # fetch bundles attached to mail
+ticket-parser mail                   # fetch exports (.zip, legacy .json.gz) attached to mail
 ticket-parser import                 # pull what the extension exported
 ticket-parser import --then-run      # …and render the report immediately
-ticket-parser import --from PATH     # non-default drop folder
+ticket-parser import --from PATH     # another drop folder, or one export (folder/.md/.zip) as-is
+ticket-parser import --include-drafts  # also take exports still marked draft
 ticket-parser flush                  # close and render right now (triage prompt on a terminal)
 ticket-parser flush --no-review      # …without the triage prompt
 ticket-parser run                    # render only if the chat has gone quiet
 ticket-parser status                 # what is pending, and when it will close
 ticket-parser prune                  # drop done/ batches past RETENTION_DAYS
+ticket-parser documents EXPORT       # fill documents an export lacks from ~/Downloads
 ticket-parser run --dry-run          # every stage, no PDF, commit nothing
 ticket-parser run --html /tmp/r.html # dump the HTML too, for restyling
 ```
@@ -309,7 +390,10 @@ The model **never emits message text**. It receives the messages with stable
 integer ids and replies with JSON metadata: which ids group together, and a
 title/category/severity for each group. The PDF renders every message body from
 `ChatMessage.text` — the exported record itself — so there is no channel through
-which a model could alter your product owner's wording.
+which a model could alter your product owner's wording. The only person who can
+change it is you, by editing the Markdown before import. Document parts are
+verbatim slices of the document text, and your notes are always shown labelled
+as notes, never as something the sender said.
 
 Enforced by tests in `tests/test_render_verbatim.py`, including one that feeds
 the clusterer a hostile reply containing rewritten text and asserts none of it

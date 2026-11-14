@@ -21,12 +21,37 @@
   }
   button.secondary { background: #4b5563; }
   button:disabled { background: #9ca3af; cursor: default; }
+  .steps { margin: 0 0 10px; padding-left: 18px; font-size: 12px; }
+  .steps li { margin-bottom: 2px; }
+  #last { display: none; margin-top: 10px; font-size: 11.5px; font-weight: 600; color: #1f2937; }
   #delivery { display: none; margin-top: 10px; padding-top: 10px; border-top: 1px solid #e5e7eb; }
-  #status {
-    margin-top: 12px; font-size: 11.5px; color: #374151;
-    white-space: pre-wrap; max-height: 150px; overflow-y: auto;
+  #toasts:empty, #notices:empty { display: none; }
+  #toasts { margin-bottom: 8px; }
+  #notices { margin-top: 10px; }
+  .notice {
+    display: flex; gap: 7px; align-items: flex-start;
+    padding: 7px 9px; margin-bottom: 6px; border-radius: 5px;
+    border: 1px solid; font-size: 11.5px; line-height: 1.4;
   }
-  #status.error { color: #b91c1c; }
+  .notice .icon { flex: none; font-size: 13px; line-height: 1.2; }
+  .notice .text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .notice strong { display: block; font-size: 12px; }
+  .notice .close {
+    flex: none; width: auto; margin: 0; padding: 0 2px; background: none;
+    color: inherit; font-size: 14px; line-height: 1; opacity: 0.6;
+  }
+  .notice.error { background: #fef2f2; border-color: #fca5a5; color: #991b1b; }
+  .notice.warning { background: #fffbeb; border-color: #fcd34d; color: #92400e; }
+  .notice.info { background: #eff6ff; border-color: #bfdbfe; color: #1e40af; }
+  .notice.success { background: #f0fdf4; border-color: #86efac; color: #166534; }
+  .notice.progress { background: #f9fafb; border-color: #e5e7eb; color: #374151; }
+  details { margin-top: 10px; font-size: 11.5px; }
+  summary { cursor: pointer; color: #6b7280; }
+  #status {
+    margin-top: 6px; font-size: 11px; color: #374151;
+    white-space: pre-wrap; max-height: 150px; overflow-y: auto;
+    background: #f9fafb; padding: 6px; border-radius: 4px;
+  }
   .hint { margin-top: 10px; font-size: 11px; color: #6b7280; }
   code { background: #f3f4f6; padding: 1px 3px; border-radius: 2px; }
 </style>
@@ -35,29 +60,42 @@
   <h1>Export this conversation</h1>
   <div class="sub">Reads the open chat. Never sends anything on its own.</div>
 
-  <label>
-    Scroll back
-    <input type="number" id="scrollbacks" value="5" min="0" max="200">
-    times before reading
-  </label>
+  <ol class="steps">
+    <li>In WhatsApp: chat menu → <em>Select messages</em>.</li>
+    <li>Tick the <strong>first</strong> and the <strong>last</strong> message to export.</li>
+    <li>Read: everything between them is exported, both included.</li>
+  </ol>
 
   <label>
     <input type="checkbox" id="includeOwn">
     include messages I sent
   </label>
 
+  <div class="hint" style="margin:-4px 0 10px">
+    Documents (Word, PDF…): click their download in WhatsApp first, in this tab —
+    only then is their content available to include.
+  </div>
+
+  <div id="toasts"></div>
   <button id="run">Read conversation</button>
 
+  <div id="notices"></div>
+  <div id="last"></div>
   <div id="delivery">
-    <button id="save">Save bundle to Downloads</button>
-    <button id="share" class="secondary">Send bundle…</button>
+    <button id="save">Save to Downloads (editable)</button>
+    <button id="saveZip" class="secondary">Save as .zip</button>
+    <button id="share" class="secondary">Send .zip…</button>
     <div class="hint">
-      On the phone, <em>Send</em> opens the share sheet — pick your mail app and
-      send it to the address <code>ticket-parser</code> watches.
+      Saves <code>conversation.md</code> plus a <code>media/</code> folder. Edit the
+      Markdown (drop messages, add <code>&gt; Note:</code> comments), then set
+      <code>status: ready</code>. On the phone, <em>Send</em> opens the share sheet.
     </div>
   </div>
 
-  <div id="status"></div>
+  <details id="details">
+    <summary>Details</summary>
+    <div id="status"></div>
+  </details>
   <div class="hint" id="footer">
     Desktop: files land in <code>Downloads/ticket-parser/</code>, then run
     <code>ticket-parser import</code>.

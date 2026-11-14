@@ -199,3 +199,44 @@ def test_the_page_says_where_a_screenshot_was_lost(storage: Storage, conn) -> No
 
     assert "could not be retrieved" in rendered
     assert "regarde ça" in rendered  # the text still survives
+
+
+def test_an_undated_message_does_not_name_the_batch_1970(storage: Storage, conn) -> None:
+    now = time.time()
+    dated = int(now - 3600)
+    write_message_record(storage, wa_id="doc", text="", timestamp=0)
+    write_message_record(storage, wa_id="msg1", text="a", timestamp=dated)
+
+    batch = collect.collect_batch(storage, conn, quiet_period_seconds=1800, now=now)
+
+    assert batch is not None
+    assert batch.batch_id == time.strftime("%Y%m%dT%H%M%S", time.localtime(dated))
+    assert batch.started_at is not None and batch.started_at.year > 1970
+    assert any("no date" in w for w in batch.warnings)
+    [undated] = [m for m in batch.messages if m.wa_id == "doc"]
+    assert undated.display_time == "date unknown"
+
+
+def test_an_all_undated_batch_is_named_after_now(storage: Storage, conn) -> None:
+    now = 1_790_000_000.0
+    write_message_record(storage, wa_id="doc", text="x", timestamp=0)
+
+    batch = collect.collect_batch(storage, conn, quiet_period_seconds=0, force=True, now=now)
+
+    assert batch is not None
+    assert batch.batch_id == time.strftime("%Y%m%dT%H%M%S", time.localtime(now))
+
+
+def test_a_reused_batch_name_gets_a_suffix(storage: Storage, conn) -> None:
+    now = time.time()
+    stamp = int(now - 3600)
+    name = time.strftime("%Y%m%dT%H%M%S", time.localtime(stamp))
+    (storage.done / f"batch-{name}").mkdir(parents=True)
+    storage.out.mkdir(parents=True, exist_ok=True)
+    (storage.out / f"{name}-2-report.pdf").write_bytes(b"%PDF")
+    write_message_record(storage, wa_id="msg1", text="a", timestamp=stamp)
+
+    batch = collect.collect_batch(storage, conn, quiet_period_seconds=1800, now=now)
+
+    assert batch is not None
+    assert batch.batch_id == f"{name}-3"  # neither done/ nor out/ is overwritten

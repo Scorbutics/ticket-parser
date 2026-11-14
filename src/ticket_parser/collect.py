@@ -14,10 +14,12 @@ import json
 import logging
 import shutil
 import sqlite3
+import tempfile
 import time
+import zipfile
 from pathlib import Path
 
-from . import db
+from . import db, documents, markdown_export
 from .models import Batch, ChatMessage, Media
 from .storage import Storage, safe_filename, write_atomic
 
@@ -64,6 +66,8 @@ def read_message_dir(directory: Path, seq: int) -> ChatMessage:
         media_error=media_error,
         timestamp_inferred=bool(record.get("timestamp_inferred")),
         document_name=str(record.get("document_name") or ""),
+        document_text=str(record.get("document_text") or ""),
+        note=str(record.get("note") or ""),
         # Filled in by an earlier `transcribe` pass and persisted to disk, so a
         # replayed or re-collected message does not pay to be transcribed twice.
         transcript=str(record.get("transcript") or ""),
@@ -150,12 +154,13 @@ def collect_batch(
             "midnight boundary."
         )
 
-    documents = [m for m in messages if m.document_name]
-    if documents:
-        names = ", ".join(sorted({m.document_name for m in documents}))
+    unread = [m for m in messages if m.document_name and not m.document_text]
+    if unread:
+        names = ", ".join(sorted({m.document_name for m in unread}))
         warnings.append(
-            f"{len(documents)} document(s) were attached and are noted but not "
-            f"included: {names}. WhatsApp only releases them on download."
+            f"{len(unread)} document(s) were attached but their contents are not "
+            f"included: {names}. Download them in WhatsApp before exporting "
+            "(scanned PDFs have no text to include)."
         )
 
     lost = [m for m in messages if m.media_error and not m.document_name]
@@ -170,12 +175,50 @@ def collect_batch(
 
     # Renumber so the ids shown to the model are dense and start at 1.
     fresh.sort(key=lambda m: m.timestamp)
+    # Each attached document becomes parts that get their own ids, so the
+    # clustering pass can put a passage of a document on the same issue as
+    # the chat messages it relates to.
+    fresh = documents.expand_documents(fresh)
     for index, message in enumerate(fresh, start=1):
         message.seq = index
 
-    started = min(m.timestamp for m in fresh)
-    batch_id = time.strftime("%Y%m%dT%H%M%S", time.localtime(started))
+    undated = [m for m in fresh if not m.timestamp]
+    if undated:
+        warnings.append(
+            f"{len(undated)} message(s) carried no date at all (typically a "
+            "document or voice note at the very top of the export); they are "
+            "shown as 'date unknown'."
+        )
+
+    batch_id = unique_batch_id(storage, batch_id_for(fresh, now=now))
     return Batch(batch_id=batch_id, messages=fresh, warnings=warnings)
+
+
+def batch_id_for(messages: list[ChatMessage], *, now: float | None = None) -> str:
+    """Name a batch after its earliest *dated* message.
+
+    A message with no date has timestamp 0; letting it win the min() would name
+    the batch after 1 Jan 1970, and every such batch would share that name.
+    """
+    dated = [m.timestamp for m in messages if m.timestamp > 0]
+    started = min(dated) if dated else (time.time() if now is None else now)
+    return time.strftime("%Y%m%dT%H%M%S", time.localtime(started))
+
+
+def unique_batch_id(storage: Storage, batch_id: str) -> str:
+    """Suffix the id if an earlier batch already used it.
+
+    Two batches sharing a name would merge into one done/ directory and the
+    second PDF would overwrite the first.
+    """
+    candidate = batch_id
+    suffix = 2
+    while (storage.done / f"batch-{candidate}").exists() or (
+        storage.out / f"{candidate}-report.pdf"
+    ).exists():
+        candidate = f"{batch_id}-{suffix}"
+        suffix += 1
+    return candidate
 
 
 def import_bundle(storage: Storage, path: Path) -> tuple[int, int]:
@@ -246,7 +289,169 @@ def import_bundle(storage: Storage, path: Path) -> tuple[int, int]:
     return imported, skipped
 
 
-def import_drop(storage: Storage, drop_dir: Path) -> tuple[int, int]:
+def _inside(root: Path, relative: str) -> Path | None:
+    """`root/relative`, or None if an edited link tries to point outside root."""
+    candidate = (root / relative).resolve()
+    try:
+        candidate.relative_to(root.resolve())
+    except ValueError:
+        return None
+    return candidate
+
+
+def import_markdown_export(
+    storage: Storage,
+    md_path: Path,
+    *,
+    document_dirs: tuple[Path, ...] = (),
+    exclude: tuple[Path, ...] = (),
+) -> tuple[int, int]:
+    """Import one (possibly hand-edited) conversation.md into inbox/.
+
+    Media links are resolved relative to the Markdown file. Documents the
+    extension could not include are first looked for in `document_dirs` and
+    written into the export (markdown_export.fill_missing_documents). Returns
+    (imported, skipped_already_present).
+    """
+    if document_dirs:
+        try:
+            filled = markdown_export.fill_missing_documents(md_path, document_dirs, exclude=exclude)
+            if filled.filled or filled.no_text:
+                log.info("documents filled in from disk", extra={"filled": filled.filled + filled.no_text})
+            if filled.not_found:
+                log.warning("documents still missing", extra={"names": filled.not_found})
+        except OSError as exc:
+            log.error("could not fill in documents", extra={"export": str(md_path), "error": str(exc)})
+    try:
+        export = markdown_export.parse_markdown(md_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, markdown_export.MarkdownExportError) as exc:
+        raise CollectError(f"unreadable export {md_path}: {exc}") from exc
+
+    root = md_path.parent
+    storage.ensure()
+    imported = 0
+    skipped = 0
+
+    for message in export.messages:
+        name = safe_filename(message.wa_id, fallback="") or f"msg-{message.timestamp}"
+        if (storage.inbox / name).exists() or storage.done_dir(name).exists():
+            skipped += 1
+            continue
+        if not any(
+            (message.text, message.note, message.media_path, message.document_path,
+             message.document_text, message.media_error)
+        ):
+            # Everything but the marker was deleted: nothing left to report.
+            continue
+
+        pending = storage.new_incoming(name)
+        record = message.record()
+        record["media"] = None
+
+        if message.media_path:
+            source = _inside(root, message.media_path)
+            if source is not None and source.is_file():
+                filename = safe_filename(f"{name}{source.suffix}", fallback=f"{name}.bin")
+                shutil.copy2(source, pending / filename)
+                record["media"] = {
+                    "filename": filename,
+                    "mimetype": markdown_export.guess_mimetype(source),
+                }
+            else:
+                record["media_error"] = record["media_error"] or (
+                    f"attachment {message.media_path} is missing from the export"
+                )
+
+        if message.document_path:
+            source = _inside(root, message.document_path)
+            if source is not None and source.is_file():
+                filename = safe_filename(source.name, fallback=f"{name}.bin")
+                shutil.copy2(source, pending / filename)
+                record["document_file"] = filename
+
+        write_atomic(
+            pending / "message.json",
+            json.dumps(record, indent=2, ensure_ascii=False).encode("utf-8"),
+        )
+        storage.commit_incoming(pending, name)
+        imported += 1
+
+    log.info(
+        "markdown export imported",
+        extra={"export": str(md_path), "imported": imported, "skipped": skipped},
+    )
+    return imported, skipped
+
+
+def _mark_imported(md_path: Path) -> None:
+    """Keep the user's edited file, but make sure it is not imported again."""
+    md_path.rename(md_path.with_name(md_path.name + ".imported"))
+
+
+def import_zip_export(storage: Storage, path: Path, **documents) -> tuple[int, int]:
+    """A zipped export: what the phone shares and what email carries.
+
+    A zip is transport, not a working copy, so it is imported whatever its
+    status says -- unzip it first if you want to edit it.
+    """
+    try:
+        with tempfile.TemporaryDirectory(prefix="ticket-parser-") as tmp:
+            with zipfile.ZipFile(path) as archive:
+                # extractall drops absolute paths and '..' components.
+                archive.extractall(tmp)
+            root = Path(tmp)
+            md_path = markdown_export.find_conversation(root)
+            if md_path is None:
+                subdirs = [d for d in root.iterdir() if d.is_dir()]
+                md_path = next(
+                    (found for d in subdirs if (found := markdown_export.find_conversation(d))),
+                    None,
+                )
+            if md_path is None:
+                raise CollectError(f"{path.name} holds no conversation.md")
+            return import_markdown_export(storage, md_path, **documents)
+    except zipfile.BadZipFile as exc:
+        raise CollectError(f"{path.name} is not a readable zip: {exc}") from exc
+
+
+def import_path(
+    storage: Storage,
+    path: Path,
+    *,
+    include_drafts: bool = False,
+    document_dirs: tuple[Path, ...] = (),
+    exclude: tuple[Path, ...] = (),
+) -> tuple[int, int]:
+    """Import whatever `path` is: a drop folder, one export folder, a .md or a .zip.
+
+    A single export named directly is imported whatever its status; a drop
+    folder is scanned with `include_drafts` deciding about drafts.
+    """
+    documents = {"document_dirs": document_dirs, "exclude": exclude}
+    if path.is_file():
+        if path.suffix.lower() == ".zip":
+            return import_zip_export(storage, path, **documents)
+        if path.suffix.lower() == ".md":
+            imported, skipped = import_markdown_export(storage, path, **documents)
+            _mark_imported(path)
+            return imported, skipped
+        return import_bundle(storage, path)
+    md_path = markdown_export.find_conversation(path) if path.is_dir() else None
+    if md_path is not None:
+        imported, skipped = import_markdown_export(storage, md_path, **documents)
+        _mark_imported(md_path)
+        return imported, skipped
+    return import_drop(storage, path, include_drafts=include_drafts, **documents)
+
+
+def import_drop(
+    storage: Storage,
+    drop_dir: Path,
+    *,
+    include_drafts: bool = True,
+    document_dirs: tuple[Path, ...] = (),
+    exclude: tuple[Path, ...] = (),
+) -> tuple[int, int]:
     """Move message dirs written by the browser extension into inbox/.
 
     The extension saves through the downloads API, so its output lands wherever
@@ -263,6 +468,43 @@ def import_drop(storage: Storage, drop_dir: Path) -> tuple[int, int]:
     skipped = 0
 
     for entry in sorted(drop_dir.iterdir()):
+        # Markdown exports: a folder holding conversation.md + media/, or a
+        # bare .md. A draft is still being edited; `watch` leaves it alone.
+        md_path = None
+        if entry.is_dir() and not (entry / "message.json").is_file():
+            md_path = markdown_export.find_conversation(entry)
+        elif entry.is_file() and entry.suffix.lower() == ".md" and markdown_export.looks_like_export(entry):
+            md_path = entry
+        if md_path is not None:
+            try:
+                export = markdown_export.parse_markdown(md_path.read_text(encoding="utf-8"))
+                if not include_drafts and not export.ready:
+                    log.info("export is still a draft, leaving it", extra={"export": str(md_path)})
+                    continue
+                added, already = import_markdown_export(
+                    storage, md_path, document_dirs=document_dirs, exclude=exclude
+                )
+            except (OSError, UnicodeDecodeError, markdown_export.MarkdownExportError, CollectError) as exc:
+                log.error("skipping bad export", extra={"export": str(md_path), "error": str(exc)})
+                continue
+            imported += added
+            skipped += already
+            _mark_imported(md_path)
+            continue
+
+        if entry.is_file() and entry.suffix.lower() == ".zip":
+            try:
+                added, already = import_zip_export(
+                    storage, entry, document_dirs=document_dirs, exclude=exclude
+                )
+            except CollectError as exc:
+                log.error("skipping bad zip export", extra={"error": str(exc)})
+                continue
+            imported += added
+            skipped += already
+            entry.unlink()
+            continue
+
         # Bundles: one gzipped file holding a whole conversation. This is what
         # arrives from the phone, by share sheet or as an email attachment.
         if entry.is_file() and entry.name.endswith((".json.gz", ".json")):

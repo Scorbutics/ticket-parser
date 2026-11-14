@@ -70,6 +70,10 @@ class Config:
     whisper_device: str
     whisper_compute_type: str
 
+    # Where to look for a document the extension could not include (it was
+    # not downloaded in WhatsApp in that tab). The drop folder is skipped.
+    document_dirs: tuple[Path, ...] = ()
+
     extra: dict[str, str] = field(default_factory=dict, repr=False)
 
     @property
@@ -147,6 +151,11 @@ def load_config(env_file: str | os.PathLike[str] | None = None) -> Config:
         claude_timeout_seconds=_int("CLAUDE_TIMEOUT_SECONDS", 600),
         claude_concurrency=max(1, _int("CLAUDE_CONCURRENCY", 2)),
         repo_path=Path(repo_raw).expanduser().resolve() if repo_raw else None,
+        document_dirs=tuple(
+            Path(part.strip()).expanduser()
+            for part in _str("DOCUMENT_SEARCH_DIRS", "~/Downloads").split(os.pathsep)
+            if part.strip()
+        ),
         # faster-whisper: free, offline, no API key. "base" is the sweet spot
         # for a voice note on CPU; int8 keeps it fast without a GPU.
         transcribe_enabled=_bool("TRANSCRIBE_ENABLED", True),

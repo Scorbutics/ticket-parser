@@ -122,4 +122,107 @@
 
   refreshLog();
   console.log(LOG, 'voice-note capture (createObjectURL hook) ready');
+
+  // -------------------------------------------------------------------------
+  // Documents (.docx, .pdf, …)
+  //
+  // WhatsApp only decrypts a document when you click its download button. At
+  // that point it builds a Blob of the decrypted file, makes a blob: URL for
+  // it, and clicks a temporary <a download="name.docx"> pointing there. The
+  // createObjectURL hook above sees the Blob; hooking the anchor click gives
+  // the filename. Nothing here clicks anything: a document is captured only
+  // because *you* downloaded it in this tab.
+  // -------------------------------------------------------------------------
+
+  const MAX_DOCUMENT_BYTES = 40 * 1024 * 1024;
+  const documents = [];
+  const blobsByUrl = new Map(); // blob: URL -> Blob, candidates only
+
+  function refreshDocumentLog() {
+    window.__ticketParserDocumentLogJSON = JSON.stringify(documents);
+  }
+
+  function isDocumentCandidate(blob) {
+    if (typeof Blob === 'undefined' || !(blob instanceof Blob)) return false;
+    if (!blob.size || blob.size > MAX_DOCUMENT_BYTES) return false;
+    return !/^(image|audio|video)\//.test(blob.type || '');
+  }
+
+  // "%PDF" or a zip ("PK\3\4", which is what .docx/.xlsx/.pptx are).
+  function sniff(bytes) {
+    if (bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 && bytes[3] === 0x46) return 'application/pdf';
+    if (bytes[0] === 0x50 && bytes[1] === 0x4b && bytes[2] === 0x03 && bytes[3] === 0x04) return 'application/zip';
+    return '';
+  }
+
+  function captureDocument(blob, name) {
+    blob
+      .arrayBuffer()
+      .then((buffer) => {
+        const bytes = new Uint8Array(buffer);
+        const sniffed = sniff(bytes);
+        const filename = String(name || blob.name || '');
+        // Without a name *and* without a recognisable signature this is some
+        // unrelated blob WhatsApp made (a sticker, a JSON payload…).
+        if (!filename && !sniffed) return;
+
+        const existing = documents.find((d) => d.byteLength === buffer.byteLength && (!d.name || !filename || d.name === filename));
+        if (existing) {
+          if (!existing.name && filename) {
+            existing.name = filename;
+            refreshDocumentLog();
+          }
+          return;
+        }
+        documents.push({
+          name: filename,
+          mimetype: blob.type && blob.type !== 'application/octet-stream' ? blob.type : sniffed || blob.type || '',
+          byteLength: buffer.byteLength,
+          base64: arrayBufferToBase64(buffer),
+        });
+        refreshDocumentLog();
+        console.log(LOG, 'captured document:', filename || '(unnamed)', buffer.byteLength + 'b', '-- total:', documents.length);
+      })
+      .catch((err) => console.error(LOG, 'could not read a document blob', err));
+  }
+
+  const createObjectURLWithAudio = URL.createObjectURL;
+  URL.createObjectURL = function ticketParserCreateObjectURLDocuments(blob) {
+    const url = createObjectURLWithAudio.call(URL, blob);
+    try {
+      if (isDocumentCandidate(blob)) {
+        blobsByUrl.set(url, blob);
+        // A File already knows its name; a bare Blob gets one when its
+        // download anchor is clicked, below. Sniffing alone catches the rest.
+        captureDocument(blob, blob.name);
+      }
+    } catch (err) {
+      console.error(LOG, 'document hook failed', err);
+    }
+    return url;
+  };
+
+  function noteAnchorDownload(anchor) {
+    try {
+      const blob = blobsByUrl.get(anchor.href);
+      if (blob) captureDocument(blob, anchor.download || anchor.getAttribute('download'));
+    } catch (err) {
+      console.error(LOG, 'download anchor hook failed', err);
+    }
+  }
+
+  const originalAnchorClick = HTMLAnchorElement.prototype.click;
+  HTMLAnchorElement.prototype.click = function ticketParserAnchorClick() {
+    noteAnchorDownload(this);
+    return originalAnchorClick.apply(this, arguments);
+  };
+
+  const originalDispatchEvent = EventTarget.prototype.dispatchEvent;
+  EventTarget.prototype.dispatchEvent = function ticketParserDispatchEvent(event) {
+    if (this instanceof HTMLAnchorElement && event && event.type === 'click') noteAnchorDownload(this);
+    return originalDispatchEvent.apply(this, arguments);
+  };
+
+  refreshDocumentLog();
+  console.log(LOG, 'document capture ready -- click a document\'s download in WhatsApp to include its contents');
 })();

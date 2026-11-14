@@ -23,7 +23,7 @@ from .models import Batch, ChatMessage, Evidence, Issue, RepoVerdict
 
 log = logging.getLogger(__name__)
 
-PROMPT_VERSION = "investigate-v1"
+PROMPT_VERSION = "investigate-v2"
 
 _PROMPT = """A non-technical product owner reported the following issue over \
 WhatsApp. You are in the repository for the product it concerns.
@@ -33,7 +33,9 @@ Category: {category}
 Reported severity: {severity}
 
 What they said, verbatim (a line marked "voice transcript" is an automated \
-transcription of a voice note and may contain transcription errors):
+transcription of a voice note and may contain transcription errors; a \
+"reviewer note" was added by the developer triaging the chat, and a \
+<document> block is a passage of a file they attached, quoted as-is):
 {quotes}
 
 Investigate whether this problem plausibly exists in this codebase as \
@@ -82,12 +84,39 @@ def _quote_body(message: ChatMessage) -> str:
     return ""
 
 
+# Per document, so one 80-page PDF cannot crowd out the rest of the prompt.
+DOCUMENT_CHARS = 20000
+
+
+def _quote(message) -> str:
+    line = f"  [{message.display_time}] {message.author_name}: {_quote_body(message)}"
+    if message.media and message.media.is_image:
+        line += f"  (screenshot: {message.media.filename})"
+    if message.note:
+        line += f"\n    (reviewer note, not part of the report: {message.note})"
+    if message.is_document_part:
+        return (
+            f"  [{message.display_time}] {message.author_name}, from the attached document "
+            f'"{message.document_name}" (part {message.part_index}/{message.part_count}):'
+            f"\n<document>\n{message.text[:DOCUMENT_CHARS]}\n</document>"
+        )
+    if message.document_parts:
+        line += (
+            f'\n    (attached document "{message.document_name}"; the passages relevant '
+            "to this issue, if any, are quoted as document parts)"
+        )
+    elif message.document_name:
+        text = message.document_text
+        if text:
+            clipped = text[:DOCUMENT_CHARS] + ("\n[… truncated]" if len(text) > DOCUMENT_CHARS else "")
+            line += f"\n    Attached document \"{message.document_name}\":\n<document>\n{clipped}\n</document>"
+        else:
+            line += f"\n    (attached document \"{message.document_name}\", contents not available)"
+    return line
+
+
 def build_prompt(issue: Issue) -> str:
-    quotes = "\n".join(
-        f"  [{message.display_time}] {message.author_name}: {_quote_body(message)}"
-        + (f"  (screenshot: {message.media.filename})" if message.media else "")
-        for message in issue.messages
-    )
+    quotes = "\n".join(_quote(message) for message in issue.messages)
     return _PROMPT.format(
         title=issue.title,
         category=issue.category,

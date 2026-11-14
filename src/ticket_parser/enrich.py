@@ -18,7 +18,7 @@ from .models import Batch, ChatMessage, Issue
 
 log = logging.getLogger(__name__)
 
-PROMPT_VERSION = "cluster-v1"
+PROMPT_VERSION = "cluster-v2"
 
 SEVERITIES = {"low", "medium", "high", "critical", "unknown"}
 
@@ -31,6 +31,12 @@ that is pure chatter with no bug content belongs to no issue and should simply \
 be omitted from your grouping. A voice note is shown as its transcript, marked \
 "(voice transcript, may contain errors)" -- treat it the same as typed text \
 when judging what the message is about.
+
+Some items are parts of a document the sender attached (marked "attached \
+document …, part i/n"). Treat each part like a message: a document often \
+covers several problems, so its parts may belong to different issues, and a \
+part belongs with the chat messages about the same problem. Parts with no bug \
+content (title page, greetings, table of contents) belong to no issue.
 
 Reply with JSON only. No prose, no code fence. Schema:
 
@@ -54,6 +60,10 @@ Messages:
 """
 
 
+# Enough of a document part for grouping; the investigate pass gets it all.
+DOCUMENT_PART_CHARS = 1500
+
+
 def _render_messages(messages: list[ChatMessage]) -> str:
     lines = []
     for message in messages:
@@ -63,6 +73,20 @@ def _render_messages(messages: list[ChatMessage]) -> str:
             text = f"(voice transcript, may contain errors) {message.transcript}"
         elif not text:
             text = "(no text)"
+        if message.is_document_part:
+            body = message.text.strip()
+            if len(body) > DOCUMENT_PART_CHARS:
+                body = body[:DOCUMENT_PART_CHARS] + " […]"
+            lines.append(
+                f"[{message.seq}] {message.author_name} (attached document "
+                f'"{message.document_name}", part {message.part_index}/{message.part_count}): {body}'
+            )
+            continue
+        if message.document_name:
+            marker += f" [document: {message.document_name}"
+            marker += f", its text follows as {message.document_parts} part(s)]" if message.document_parts else "]"
+        if message.note:
+            marker += f" (reviewer note: {' '.join(message.note.split())})"
         lines.append(f"[{message.seq}] {message.author_name}: {text}{marker}")
     return "\n".join(lines)
 
@@ -153,7 +177,7 @@ def _issues_from_payload(payload: object, batch: Batch) -> list[Issue]:
                 title=str(raw.get("title") or "Untitled issue").strip(),
                 category=str(raw.get("category") or "uncategorised").strip().lower(),
                 severity=severity if severity in SEVERITIES else "unknown",
-                messages=sorted(members, key=lambda m: m.timestamp),
+                messages=sorted(members, key=lambda m: (m.timestamp, m.seq)),
             )
         )
 

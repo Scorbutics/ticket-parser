@@ -1,7 +1,9 @@
 """The data structures the PDF is rendered from.
 
 `ChatMessage.text` is the product owner's wording, read from the exported
-message.json and never rewritten. Nothing downstream -- clustering, the repo
+message.json and never rewritten. (The one person who may change it is you,
+by editing the Markdown export before importing it; that is deliberate. A
+document part's text is a verbatim slice of the attached document.) Nothing downstream -- clustering, the repo
 pass, the template -- may modify it. That is what makes the verbatim guarantee
 structural rather than a prompt instruction: the model's replies are consumed
 only as ids and labels, so there is no path by which a model could alter text.
@@ -42,6 +44,17 @@ class ChatMessage:
     media: Media | None = None
     media_error: str = ""  # a picture existed but could not be retrieved
     document_name: str = ""  # a file was attached; WhatsApp only decrypts on click
+    document_text: str = ""  # its text, when it was downloaded and readable (docx, pdf…)
+    # A reviewer's comment added while editing the Markdown export. Kept apart
+    # from `text`, which is what the sender actually wrote.
+    note: str = ""
+    # Documents are split into parts that cluster like messages (documents.py).
+    # On the carrying message: how many parts its document became. On a part:
+    # the carrying message's wa_id, and which part this is.
+    document_parts: int = 0
+    document_part_of: str = ""
+    part_index: int = 0
+    part_count: int = 0
     transcript: str = ""  # speech-to-text of a voice note, filled in after collection
     transcript_error: str = ""  # a voice note existed but could not be transcribed
     # True when the time came from a bubble label rather than full metadata
@@ -54,7 +67,18 @@ class ChatMessage:
         return datetime.fromtimestamp(self.timestamp, tz=timezone.utc).astimezone()
 
     @property
+    def is_document_part(self) -> bool:
+        return bool(self.document_part_of)
+
+    @property
+    def is_dated(self) -> bool:
+        # 0 is what the extension writes when it found no date for the row.
+        return self.timestamp > 0
+
+    @property
     def display_time(self) -> str:
+        if not self.is_dated:
+            return "date unknown"
         return self.sent_at.strftime("%d/%m/%Y %H:%M")
 
     def fingerprint(self) -> str:
@@ -124,13 +148,18 @@ class Issue:
 
     @property
     def started_at(self) -> datetime | None:
-        return min((m.sent_at for m in self.messages), default=None)
+        return min((m.sent_at for m in self.messages if m.is_dated), default=None)
 
     def content_hash(self) -> str:
         """Identity of the issue's *content*, for the verdict cache key."""
         import hashlib
 
-        payload = "\x1f".join([self.title, *(m.text for m in self.messages)])
+        payload = "\x1f".join(
+            [
+                self.title,
+                *(f"{m.text}\x1e{m.note}\x1e{m.document_text}" for m in self.messages),
+            ]
+        )
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -146,8 +175,8 @@ class Batch:
 
     @property
     def started_at(self) -> datetime | None:
-        return min((m.sent_at for m in self.messages), default=None)
+        return min((m.sent_at for m in self.messages if m.is_dated), default=None)
 
     @property
     def ended_at(self) -> datetime | None:
-        return max((m.sent_at for m in self.messages), default=None)
+        return max((m.sent_at for m in self.messages if m.is_dated), default=None)
