@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "ticket-parser scraper",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Read the open WhatsApp Web conversation and export it for ticket-parser. Reads only; never sends anything.",
   "browser_specific_settings": {
     "gecko": {

@@ -1,0 +1,94 @@
+# Build the Firefox extension, have Mozilla sign it, and publish the signed
+# .xpi as a GitHub release -- on every pushed tag like "v0.2.0".
+#
+#   1. bump "version" in extension/manifest.json (Mozilla never signs the
+#      same version twice), commit
+#   2. git tag v<that version> && git push origin v<that version>
+#
+# Signing uses the "unlisted" channel: Mozilla signs it for self-distribution,
+# with no public listing on addons.mozilla.org. The API key pair comes from
+# addons.mozilla.org → Developer Hub → Manage API Keys, stored as the
+# repository secrets AMO_JWT_ISSUER and AMO_JWT_SECRET.
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # to create the release
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  WEB_EXT_VERSION: "10.6.0"
+
+jobs:
+  extension:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag matches the manifest version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          manifest="$(jq -r .version extension/manifest.json)"
+          if [ "$tag" != "$manifest" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match manifest version $manifest — bump extension/manifest.json first"
+            exit 1
+          fi
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Same checks as a local build: manifest valid, every referenced file
+      # present, no inline <script> the extension CSP would block.
+      - name: Build (validation)
+        run: python scripts/build_extension.py
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Lint
+        run: npx --yes "web-ext@${WEB_EXT_VERSION}" lint --source-dir=extension
+
+      - name: Sign with Mozilla
+        env:
+          WEB_EXT_API_KEY: ${{ secrets.AMO_JWT_ISSUER }}
+          WEB_EXT_API_SECRET: ${{ secrets.AMO_JWT_SECRET }}
+        run: |
+          if [ -z "$WEB_EXT_API_KEY" ] || [ -z "$WEB_EXT_API_SECRET" ]; then
+            echo "::error::repository secrets AMO_JWT_ISSUER / AMO_JWT_SECRET are not set"
+            exit 1
+          fi
+          npx --yes "web-ext@${WEB_EXT_VERSION}" sign \
+            --channel=unlisted \
+            --source-dir=extension \
+            --artifacts-dir=signed \
+            --approval-timeout=1200000
+          ls -l signed
+
+      - name: Keep the signed .xpi as a build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ticket-parser-scraper-${{ github.ref_name }}
+          path: signed/*.xpi
+          if-no-files-found: error
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          xpi="ticket-parser-scraper-${version}.xpi"
+          cp signed/*.xpi "$xpi"
+          gh release create "$GITHUB_REF_NAME" "$xpi" \
+            --title "Extension ${GITHUB_REF_NAME}" \
+            --generate-notes \
+            --notes "Signed by Mozilla (unlisted). Install: open ${xpi} in Firefox, or Add-ons → ⚙ → Install Add-on From File."

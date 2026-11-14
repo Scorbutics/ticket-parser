@@ -341,8 +341,26 @@ pipeline. Force it either way with `--review` / `--no-review`.
 
 The same extension, signed and installed on Firefox for Android:
 
+Releases are built and signed by GitHub Actions
+(`.github/workflows/release.yml`). Bump `version` in `extension/manifest.json`
+(Mozilla never signs the same version twice), commit, then push a matching tag:
+
 ```bash
-python3 scripts/build_extension.py       # → dist/*.xpi (unsigned)
+git tag v0.2.0 && git push origin v0.2.0
+```
+
+The workflow checks the tag against the manifest version, then validates and
+lints the extension. It has Mozilla sign it on the unlisted channel (no public
+listing) and publishes the signed `.xpi` as a GitHub release. It uses the
+repository secrets `AMO_JWT_ISSUER` / `AMO_JWT_SECRET` (addons.mozilla.org →
+Developer Hub → Manage API Keys). The signed file installs permanently on
+desktop and Android: open it in Firefox, or Add-ons → ⚙ → Install Add-on From
+File.
+
+To sign by hand instead:
+
+```bash
+python3 scripts/build_extension.py       # → dist/*.xpi (unsigned), validation only
 npx web-ext sign --channel=unlisted --source-dir=extension \
   --api-key=$AMO_JWT_ISSUER --api-secret=$AMO_JWT_SECRET
 ```

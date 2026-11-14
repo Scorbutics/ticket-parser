@@ -5,3 +5,6 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 dist/
+data-test/
+extension/.amo-upload-uuid
+web-ext-artifacts/
