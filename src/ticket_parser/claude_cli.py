@@ -74,9 +74,32 @@ class SubprocessClaudeRunner:
         self.binary = binary
         self.model = model
         self.default_timeout = default_timeout
+        self._cli_version: str | None = None
 
     def available(self) -> bool:
         return shutil.which(self.binary) is not None
+
+    def model_identity(self, model: str = "") -> str:
+        """What a cached answer was produced by, for cache keys.
+
+        A pinned id ("claude-opus-5-5") names one model. An alias ("opus",
+        "sonnet") means "the latest", and which model that is changes when the
+        CLI is updated -- so the CLI version is part of the identity, and a
+        newer model re-investigates instead of serving the previous one's
+        cached verdict.
+        """
+        effective = model or self.model
+        if effective.startswith("claude-"):
+            return effective
+        if self._cli_version is None:
+            try:
+                result = subprocess.run(
+                    [self.binary, "--version"], capture_output=True, text=True, timeout=30, check=False
+                )
+                self._cli_version = result.stdout.strip().split()[0] if result.stdout.strip() else "unknown"
+            except (OSError, subprocess.TimeoutExpired):
+                self._cli_version = "unknown"
+        return f"{effective or 'cli-default'}@claude-cli-{self._cli_version}"
 
     def _argv(
         self, prompt: str, allowed_tools: Sequence[str], model: str = ""

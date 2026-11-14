@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import subprocess
+
 import pytest
 
 from ticket_parser.claude_cli import (
@@ -66,3 +68,21 @@ def test_per_call_model_overrides_the_runner_default() -> None:
 def test_no_model_anywhere_leaves_it_to_the_cli() -> None:
     argv = SubprocessClaudeRunner("claude")._argv("hello", ())
     assert "--model" not in argv
+
+
+def test_an_alias_is_tied_to_the_cli_version_for_caching(monkeypatch) -> None:
+    from ticket_parser import claude_cli
+
+    runner = claude_cli.SubprocessClaudeRunner("claude")
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout="2.1.325 (Claude Code)\n", stderr="")
+
+    monkeypatch.setattr(claude_cli.subprocess, "run", fake_run)
+
+    assert runner.model_identity("claude-opus-5-5") == "claude-opus-5-5"  # pinned: as-is
+    assert runner.model_identity("opus") == "opus@claude-cli-2.1.325"
+    assert runner.model_identity("sonnet") == "sonnet@claude-cli-2.1.325"
+    assert len(calls) == 1  # the version is asked once

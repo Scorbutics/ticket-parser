@@ -446,9 +446,16 @@ The two passes are different jobs, so they are configured separately:
 
 | Setting | Job | Reasonable choice |
 | --- | --- | --- |
-| `CLAUDE_MODEL_CLUSTER` | Read a handful of messages, return a few lines of JSON | `claude-haiku-4-5-20251001` |
-| `CLAUDE_MODEL_INVESTIGATE` | Navigate an unfamiliar codebase, reach a judgement you will act on | `claude-opus-5` |
-| `CLAUDE_MODEL` | Fallback when either is unset | `claude-sonnet-5` |
+| `CLAUDE_MODEL_CLUSTER` | Read a handful of messages, return a few lines of JSON | `sonnet` |
+| `CLAUDE_MODEL_INVESTIGATE` | Navigate an unfamiliar codebase, reach a judgement you will act on | `opus` |
+| `CLAUDE_MODEL` | Fallback when either is unset | `sonnet` |
+
+`sonnet`, `opus` and `haiku` are aliases the `claude` CLI resolves to the
+latest model of that family, so you follow new releases without editing
+anything. Updating the CLI moves them forward, and cached verdicts are then
+re-done rather than served from the previous model. The CLI version is part of
+the cache key for an alias. Pin an exact id (`claude-opus-5-5`) instead to keep
+results comparable over time.
 
 Leaving all three empty defers to whatever the `claude` CLI defaults to. Since
 the model is in the cache key, you can change one and re-run to compare verdicts

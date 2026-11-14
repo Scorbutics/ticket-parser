@@ -279,9 +279,11 @@ def investigate_batch(
 
     head = repo_head(repo_path)
     pending: list[Issue] = []
+    # An alias like "opus" is pinned to the model it resolves to today.
+    identity = runner.model_identity(model) if hasattr(runner, "model_identity") else model
 
     for issue in batch.issues:
-        key = cache_key(issue, head, model)
+        key = cache_key(issue, head, identity)
         cached = db.cache_get(conn, key)
         if cached:
             issue.verdict = _verdict_from_payload(json.loads(cached), head)
@@ -326,7 +328,7 @@ def investigate_batch(
             with db.transaction(conn):
                 db.cache_put(
                     conn,
-                    cache_key=cache_key(issue, head, model),
+                    cache_key=cache_key(issue, head, identity),
                     message_id=batch.batch_id,
                     issue_key=issue.key,
                     repo_head=head,
