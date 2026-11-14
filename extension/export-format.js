@@ -368,7 +368,7 @@ function shortId(id) {
 
 // A text line that would otherwise be read back as structure is escaped
 // with a leading backslash. markdown_export.py strips exactly one.
-const STRUCTURAL_LINE = /^(#|> ?note:|`{3}|⚠️|<!--|!\[|\[🎤|\[📄|\\)/i;
+const STRUCTURAL_LINE = /^(#| {0,3}> ?note:|`{3}|⚠️|<!--|!\[|\[🎤|\[📄|\\)/i;
 const escapeTextLine = (line) => (STRUCTURAL_LINE.test(line) ? `\\${line}` : line);
 
 function fenceFor(text) {

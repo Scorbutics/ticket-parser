@@ -226,3 +226,13 @@ def test_document_parts_get_their_own_ids_and_render(
     html = render.render_html(batch)
     assert "part 2/" in html
     assert "Note:" in html
+
+
+def test_an_indented_note_is_still_a_note() -> None:
+    # Markdown allows up to three spaces before a blockquote's ">".
+    text = EXPORT.format(status="draft").replace("> Note: only on Android,\n> see ticket 42", "  > Note: only on Android,\n  > see ticket 42")
+
+    b = parse_markdown(text).messages[1]
+
+    assert b.text == "voici le doc (edited by me)"
+    assert b.note.startswith("only on Android,\nsee ticket 42")

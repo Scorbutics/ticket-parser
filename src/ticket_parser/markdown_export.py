@@ -34,12 +34,14 @@ _FRONT_MATTER = re.compile(r"\A---\n(.*?)\n---\n", re.DOTALL)
 _MARKER = re.compile(r"^<!--\s*msg\s+(\{.*\})\s*-->\s*$")
 _MEDIA_LINK = re.compile(r"^!?\[([^\]]*)\]\((media/[^)\s]+)\)\s*$")
 _FENCE_OPEN = re.compile(r"^(`{3,})document\s*$")
-_NOTE_START = re.compile(r"^>\s?(?:📝\s*)?note\s*:\s?(.*)$", re.IGNORECASE)
+# Up to three leading spaces, as Markdown itself allows for a blockquote.
+_NOTE_START = re.compile(r"^ {0,3}>\s?(?:📝\s*)?note\s*:\s?(.*)$", re.IGNORECASE)
+_QUOTE_LINE = re.compile(r"^ {0,3}>\s?")
 _WARNING = re.compile(r"^⚠️\s?(.*)$")
 _COMMENT_BLOCK = re.compile(r"<!--(?!\s*msg\s).*?-->", re.DOTALL)
 # Lines export-format.js escaped with one backslash because they would
 # otherwise read as structure.
-_ESCAPED = re.compile(r"^\\(#|> ?note:|`{3}|⚠️|<!--|!\[|\[🎤|\[📄|\\)", re.IGNORECASE)
+_ESCAPED = re.compile(r"^\\(#| {0,3}> ?note:|`{3}|⚠️|<!--|!\[|\[🎤|\[📄|\\)", re.IGNORECASE)
 
 DOCUMENT_EXTENSIONS = {
     ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".pdf", ".odt", ".ods",
@@ -213,8 +215,8 @@ def _parse_section(lines: list[str]) -> tuple[dict | None, ExportedMessage | Non
         note = _NOTE_START.match(line)
         if note:
             block = [note.group(1)]
-            while index < len(lines) and lines[index].startswith(">"):
-                block.append(re.sub(r"^>\s?", "", lines[index]))
+            while index < len(lines) and _QUOTE_LINE.match(lines[index]):
+                block.append(_QUOTE_LINE.sub("", lines[index]))
                 index += 1
             notes.append("\n".join(block).strip())
             continue
