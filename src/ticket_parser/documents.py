@@ -17,7 +17,7 @@ from __future__ import annotations
 import re
 from dataclasses import replace
 
-from .models import ChatMessage
+from .models import IMAGE_TOKEN, ChatMessage
 
 TARGET_CHARS = 500  # a part is closed at the next natural boundary past this
 LIST_ITEM_MIN_CHARS = 150  # …or at the next list item past this
@@ -29,6 +29,8 @@ _LIST_ITEM = re.compile(r"^\s*(?:[-*•▪◦]|\d+[.)]|[a-zA-Z][.)])\s+")
 
 def _looks_like_heading(line: str) -> bool:
     stripped = line.strip()
+    if IMAGE_TOKEN.match(stripped):
+        return False  # a figure belongs with the text around it
     return (
         0 < len(stripped) <= 80
         and not stripped.endswith((".", ",", ";", ":", "!", "?"))
@@ -103,8 +105,10 @@ def expand_documents(messages: list[ChatMessage]) -> list[ChatMessage]:
                     document_part_of=message.wa_id,
                     part_index=index,
                     part_count=len(parts),
-                    # Not a message directory of its own: nothing to move on commit.
+                    # Not a message directory of its own: nothing to move on
+                    # commit. Its figures are in the carrying message's.
                     source_dir=None,
+                    asset_dir=message.asset_dir or message.source_dir,
                 )
             )
     return expanded

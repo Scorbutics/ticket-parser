@@ -19,11 +19,11 @@ from typing import Callable
 
 from . import db
 from .claude_cli import REPO_READONLY_TOOLS, ClaudeError, ClaudeRunner, extract_json
-from .models import Batch, ChatMessage, Evidence, Issue, RepoVerdict
+from .models import IMAGE_TOKEN, Batch, ChatMessage, Evidence, Issue, RepoVerdict
 
 log = logging.getLogger(__name__)
 
-PROMPT_VERSION = "investigate-v2"
+PROMPT_VERSION = "investigate-v3"
 
 _PROMPT = """A non-technical product owner reported the following issue over \
 WhatsApp. You are in the repository for the product it concerns.
@@ -38,7 +38,7 @@ transcription of a voice note and may contain transcription errors; a \
 <document> block is a passage of a file they attached, quoted as-is):
 {quotes}
 
-Investigate whether this problem plausibly exists in this codebase as \
+{images}Investigate whether this problem plausibly exists in this codebase as \
 described. Read the relevant code and use git history where it helps. Do not \
 modify anything.
 
@@ -88,17 +88,45 @@ def _quote_body(message: ChatMessage) -> str:
 DOCUMENT_CHARS = 20000
 
 
+def _with_image_paths(message, text: str) -> str:
+    """[image: fig.png] -> [image: /abs/path/fig.png], so it can be opened."""
+
+    def resolve(match):
+        path = message.image_path(match.group(1))
+        return f"[image: {path}]" if path else f"[image: {match.group(1)} (missing)]"
+
+    return IMAGE_TOKEN.sub(resolve, text)
+
+
+def issue_images(issue: Issue) -> list[Path]:
+    """Every screenshot and document figure on this issue, as absolute paths."""
+    paths: list[Path] = []
+    for message in issue.messages:
+        if message.media and message.media.is_image and message.media.path.is_file():
+            paths.append(message.media.path.resolve())
+        # A part carries its passage in `text`; an unsplit document in
+        # `document_text`. (A split one's figures are in its parts.)
+        text = message.text if message.is_document_part else ""
+        if not message.document_parts:
+            text += "\n" + message.document_text
+        for match in IMAGE_TOKEN.finditer(text):
+            path = message.image_path(match.group(1))
+            if path:
+                paths.append(path.resolve())
+    return list(dict.fromkeys(paths))
+
+
 def _quote(message) -> str:
     line = f"  [{message.display_time}] {message.author_name}: {_quote_body(message)}"
     if message.media and message.media.is_image:
-        line += f"  (screenshot: {message.media.filename})"
+        line += f"  [screenshot: {message.media.path.resolve()}]"
     if message.note:
         line += f"\n    (reviewer note, not part of the report: {message.note})"
     if message.is_document_part:
         return (
             f"  [{message.display_time}] {message.author_name}, from the attached document "
             f'"{message.document_name}" (part {message.part_index}/{message.part_count}):'
-            f"\n<document>\n{message.text[:DOCUMENT_CHARS]}\n</document>"
+            f"\n<document>\n{_with_image_paths(message, message.text[:DOCUMENT_CHARS])}\n</document>"
         )
     if message.document_parts:
         line += (
@@ -109,7 +137,7 @@ def _quote(message) -> str:
         text = message.document_text
         if text:
             clipped = text[:DOCUMENT_CHARS] + ("\n[… truncated]" if len(text) > DOCUMENT_CHARS else "")
-            line += f"\n    Attached document \"{message.document_name}\":\n<document>\n{clipped}\n</document>"
+            line += f"\n    Attached document \"{message.document_name}\":\n<document>\n{_with_image_paths(message, clipped)}\n</document>"
         else:
             line += f"\n    (attached document \"{message.document_name}\", contents not available)"
     return line
@@ -117,11 +145,19 @@ def _quote(message) -> str:
 
 def build_prompt(issue: Issue) -> str:
     quotes = "\n".join(_quote(message) for message in issue.messages)
+    images = (
+        "The [screenshot: …] and [image: …] entries above are files you can open \n"
+        "with the Read tool to see them. Look at them: they often show the actual \n"
+        "problem (an error message, a wrong value, a broken layout).\n\n"
+        if issue_images(issue)
+        else ""
+    )
     return _PROMPT.format(
         title=issue.title,
         category=issue.category,
         severity=issue.severity,
         quotes=quotes,
+        images=images,
     )
 
 
@@ -212,6 +248,7 @@ def investigate_issue(
             timeout=timeout,
             label=f"investigate:{issue.key}",
             model=model,
+            extra_dirs=sorted({path.parent for path in issue_images(issue)}),
         )
         return _verdict_from_payload(extract_json(result.text), head)
     except ClaudeError as exc:

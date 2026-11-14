@@ -48,6 +48,21 @@ DOCUMENT_EXTENSIONS = {
 }
 
 
+IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+
+
+def _is_figure(line: str, link: re.Match) -> bool:
+    """`![📄 figure 2](media/…png)`: a picture from inside a document.
+
+    Told apart from a WhatsApp screenshot (`![screenshot](…)`) by the 📄.
+    """
+    return (
+        line.startswith("!")
+        and link.group(1).startswith("📄")
+        and Path(link.group(2)).suffix.lower() in IMAGE_SUFFIXES
+    )
+
+
 class MarkdownExportError(ValueError):
     pass
 
@@ -68,6 +83,9 @@ class ExportedMessage:
     # What the page showed about a document it could not include (name, type,
     # size) -- used to find the file on disk instead.
     document_hint: dict = field(default_factory=dict)
+    # media/ paths of the pictures from inside the document; their places in
+    # document_text are "[image: <file name>]" lines.
+    document_figures: list[str] = field(default_factory=list)
     document_text: str = ""
     media_error: str = ""
 
@@ -163,6 +181,7 @@ def _parse_section(lines: list[str]) -> tuple[dict | None, ExportedMessage | Non
     text_lines: list[str] = []
     notes: list[str] = []
     document_parts: list[str] = []
+    figures: list[str] = []
     warnings: list[str] = []
     media_path = ""
     document_path = ""
@@ -201,6 +220,12 @@ def _parse_section(lines: list[str]) -> tuple[dict | None, ExportedMessage | Non
             continue
 
         link = _MEDIA_LINK.match(line)
+        if link and _is_figure(line, link):
+            # A picture from inside the attached document, at its place in
+            # the document's text.
+            document_parts.append(f"[image: {Path(link.group(2)).name}]")
+            figures.append(link.group(2))
+            continue
         if link:
             path = link.group(2)
             if Path(path).suffix.lower() in DOCUMENT_EXTENSIONS:
@@ -237,6 +262,7 @@ def _parse_section(lines: list[str]) -> tuple[dict | None, ExportedMessage | Non
         document_label=document_label,
         document_hint=marker.get("doc") if isinstance(marker.get("doc"), dict) else {},
         document_text="\n\n".join(part for part in document_parts if part),
+        document_figures=figures,
         media_error=" ".join(warnings),
     )
     if not message.wa_id:
@@ -396,13 +422,22 @@ def _fill_section(section, root, directories, exclude, report, document_text) ->
     shutil.copy2(source, target)
 
     insert = [f"[📄 {source.name.replace('[', '').replace(']', '')}]({relative})", ""]
-    text, error = document_text.extract_text(source)
-    if text:
-        fence = _fence_for(text)
-        insert += [f"{fence}document", text, fence, ""]
+    content = document_text.extract_content(source)
+    stem = relative[: -len(Path(relative).suffix) or None]
+    figure_count = 0
+    for kind, value in content.segments():
+        if kind == "text":
+            fence = _fence_for(value)
+            insert += [f"{fence}document", value, fence, ""]
+        else:
+            figure_count += 1
+            figure_path = f"{stem}-fig{figure_count}{value.extension}"
+            (root / figure_path).write_bytes(value.data)
+            insert += [f"![📄 {value.label}]({figure_path})", ""]
+    if content.text.strip():
         report.filled.append(source.name)
-    elif error:
-        insert += [f"⚠️ could not read the text of \"{source.name}\": {error}", ""]
+    elif content.error:
+        insert += [f"⚠️ could not read the text of \"{source.name}\": {content.error}", ""]
         report.no_text.append(source.name)
     else:
         report.no_text.append(source.name)

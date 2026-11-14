@@ -83,6 +83,23 @@ def build_data_uris(messages: list[ChatMessage]) -> dict[str, str]:
     return uris
 
 
+def document_segments(message: ChatMessage, text: str) -> list[dict]:
+    """Document text with its figures inlined, for the template.
+
+    [{"text": …}] and [{"image": name, "uri": data-URI or ""}] in order. A
+    figure whose file is missing keeps its place, as a marked gap.
+    """
+    out: list[dict] = []
+    for kind, value in message.segments(text):
+        if kind == "text":
+            out.append({"text": value})
+            continue
+        path = message.image_path(value)
+        uri = data_uri_for(path, mimetypes.guess_type(value)[0] or "") if path else None
+        out.append({"image": value, "uri": uri or ""})
+    return out
+
+
 def render_html(batch: Batch, template_dir: Path | None = None) -> str:
     env = Environment(
         loader=FileSystemLoader(str(template_dir or TEMPLATE_DIR)),
@@ -92,6 +109,7 @@ def render_html(batch: Batch, template_dir: Path | None = None) -> str:
         autoescape=True,
         undefined=StrictUndefined,
     )
+    env.globals["segments"] = document_segments
     template = env.get_template(TEMPLATE_NAME)
     return template.render(batch=batch, data_uris=build_data_uris(batch.messages))
 

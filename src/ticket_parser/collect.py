@@ -73,6 +73,7 @@ def read_message_dir(directory: Path, seq: int) -> ChatMessage:
         transcript=str(record.get("transcript") or ""),
         transcript_error=str(record.get("transcript_error") or ""),
         source_dir=directory,
+        asset_dir=directory,
     )
 
 
@@ -361,6 +362,16 @@ def import_markdown_export(
                 record["media_error"] = record["media_error"] or (
                     f"attachment {message.media_path} is missing from the export"
                 )
+
+        figures: list[str] = []
+        for relative in message.document_figures:
+            source = _inside(root, relative)
+            if source is not None and source.is_file():
+                shutil.copy2(source, pending / source.name)
+                figures.append(source.name)
+            else:
+                log.warning("document figure missing from the export", extra={"file": relative})
+        record["document_images"] = figures
 
         if message.document_path:
             source = _inside(root, message.document_path)

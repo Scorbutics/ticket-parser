@@ -210,12 +210,24 @@ in the same tab, before reading**. `page-hook.js` catches the decrypted file as
 WhatsApp hands it to the browser. The extension still never clicks anything
 itself. The file is saved under `media/`, and its text goes into the Markdown:
 
-- **Word (.docx):** paragraphs, list items and table rows, read directly.
+- **Word (.docx):** paragraphs, list items and table rows, read directly, plus
+  the pictures inside, each at its place in the text (EMF/WMF vector pictures
+  are left out: neither a browser nor the model can show them).
 - **PDF:** the text layer, via a vendored pdf.js (`extension/vendor/`,
-  Apache-2.0). There is no OCR: a scanned PDF has no text, so only the file is
-  linked.
+  Apache-2.0, with its standard fonts), plus a picture of every page that has
+  images on it. A whole page is captured rather than the images pulled out of
+  it, because a PDF image is often tiles or masks, and the page is what the
+  reader saw. There is no OCR, but a scanned PDF's pages are images, so they
+  come through as page pictures.
 - **.txt/.csv/.md:** as-is. Other types (old `.doc`, spreadsheets) are linked
   but not read.
+
+In `conversation.md`, the pictures appear as `![📄 figure 1](media/…)` (or
+`📄 page 3`) lines between the document's text blocks. The 📄 is what tells
+them apart from a WhatsApp screenshot; delete a line to drop that picture.
+They stay with their passage when the document is split into parts. They are
+shown in place on the PDF page, and the investigation can look at them (see
+*The repository pass*).
 
 A document that was not downloaded in that tab is still detected, by its "3
 pages • DOCX • 689 kB" line, and named with a ⚠️ saying its contents are
@@ -413,6 +425,15 @@ Each issue gets its own `claude` session with `cwd` pinned to `REPO_PATH` and
 this allowlist: `Read`, `Grep`, `Glob`, and read-only git (`log`, `show`,
 `blame`, `diff`, `status`, `rev-parse`). `Edit`, `Write`, `WebFetch` and
 `WebSearch` are explicitly denied. **The pipeline never mutates your repo.**
+
+**It sees the pictures.** The issue's WhatsApp screenshots and the pictures
+from its documents (figures, page pictures) are listed in the prompt by
+absolute path. Claude gets read access to exactly the folders holding them
+(`--add-dir`, still read-only) and is told to open them with `Read`. Claude
+reads images, so an error message or broken layout shown only in a screenshot
+becomes evidence, not just a file name. (Clustering stays text-only and
+cheap: it groups by what was said, and sees a picture only as
+`[image: …]`.)
 
 Verdicts are cached in SQLite on `(issue content, repo git HEAD, prompt version,
 model)`, so re-rendering costs nothing, while a new commit — or a change of

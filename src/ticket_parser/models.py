@@ -11,9 +11,15 @@ only as ids and labels, so there is no path by which a model could alter text.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+
+# A figure inside a document's text: a line "[image: <file name>]", the file
+# sitting in the message's directory (ChatMessage.asset_dir). Kept as a line of
+# the text so it travels with whichever document part it falls in.
+IMAGE_TOKEN = re.compile(r"^\[image: ([^\]\n/\\]+)\]$", re.MULTILINE)
 
 
 @dataclass(frozen=True)
@@ -55,6 +61,9 @@ class ChatMessage:
     document_part_of: str = ""
     part_index: int = 0
     part_count: int = 0
+    # Where a document's figures live. The message's own directory; for a
+    # document part, its carrying message's (a part has no directory of its own).
+    asset_dir: Path | None = None
     transcript: str = ""  # speech-to-text of a voice note, filled in after collection
     transcript_error: str = ""  # a voice note existed but could not be transcribed
     # True when the time came from a bubble label rather than full metadata
@@ -65,6 +74,29 @@ class ChatMessage:
     @property
     def sent_at(self) -> datetime:
         return datetime.fromtimestamp(self.timestamp, tz=timezone.utc).astimezone()
+
+    def image_path(self, name: str) -> Path | None:
+        """Absolute path of a figure named in an [image: …] line, if present."""
+        base = self.asset_dir or self.source_dir
+        if base is None:
+            return None
+        path = base / name
+        return path if path.is_file() else None
+
+    def segments(self, text: str) -> list[tuple[str, str]]:
+        """Text split around its [image: …] lines: [("text", …) | ("image", name)]."""
+        out: list[tuple[str, str]] = []
+        last = 0
+        for match in IMAGE_TOKEN.finditer(text):
+            chunk = text[last : match.start()].strip("\n")
+            if chunk.strip():
+                out.append(("text", chunk))
+            out.append(("image", match.group(1)))
+            last = match.end()
+        tail = text[last:].strip("\n")
+        if tail.strip():
+            out.append(("text", tail))
+        return out
 
     @property
     def is_document_part(self) -> bool:

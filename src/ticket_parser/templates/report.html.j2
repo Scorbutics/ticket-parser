@@ -60,6 +60,7 @@
   .msg .missing { font-size: 9pt; color: var(--muted); font-style: italic; }
   .msg .voice-label { font-size: 9pt; color: var(--muted); margin-top: 1mm; }
   .msg .doc-label { margin-top: 1mm; font-weight: 600; }
+  .msg .doctext img.figure { display: block; max-width: 100%; max-height: 120mm; margin: 2mm 0; border: 1px solid #e5e7eb; }
   .msg .doctext { margin-top: 1mm; padding: 2mm 3mm; border-left: 2px solid #9ca3af; font-size: 0.9em; white-space: pre-wrap; }
   .msg .note { margin-top: 1.5mm; padding: 1.5mm 3mm; background: #fef9c3; border-radius: 3px; font-size: 0.92em; white-space: pre-wrap; }
   .msg .transcript { margin-top: 1mm; padding: 2mm 3mm; background: var(--bubble); border-radius: 3px; }
@@ -124,7 +125,7 @@
   {% if message.is_document_part %}
   <div class="msg">
     <div class="who">📄 {{ message.document_name }} &middot; part {{ message.part_index }}/{{ message.part_count }} &middot; sent by {{ message.author_name }}, {{ message.display_time }}</div>
-    <div class="body doctext">{{ message.text }}</div>
+    <div class="doctext">{% for seg in segments(message, message.text) %}{% if seg.text is defined %}<div class="body">{{ seg.text }}</div>{% elif seg.uri %}<img class="figure" src="{{ seg.uri }}" alt="{{ seg.image }}">{% else %}<div class="missing">[figure missing: {{ seg.image }}]</div>{% endif %}{% endfor %}</div>
   </div>
   {% else %}
   <div class="msg">
@@ -142,7 +143,7 @@
     {% elif message.document_name %}
       <div class="doc-label">📄 document attached: {{ message.document_name }}</div>
       {% if message.document_parts %}<div class="missing">[its text is split into {{ message.document_parts }} part(s), each shown with the issue it relates to]</div>
-      {% elif message.document_text %}<div class="body doctext">{{ message.document_text }}</div>
+      {% elif message.document_text %}<div class="doctext">{% for seg in segments(message, message.document_text) %}{% if seg.text is defined %}<div class="body">{{ seg.text }}</div>{% elif seg.uri %}<img class="figure" src="{{ seg.uri }}" alt="{{ seg.image }}">{% else %}<div class="missing">[figure missing: {{ seg.image }}]</div>{% endif %}{% endfor %}</div>
       {% else %}<div class="missing">[document contents not available{% if message.media_error %}: {{ message.media_error }}{% endif %}]</div>{% endif %}
     {% elif message.media_error %}
       <div class="missing">[a screenshot was sent here but could not be retrieved: {{ message.media_error }}]</div>

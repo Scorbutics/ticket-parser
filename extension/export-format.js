@@ -10,8 +10,9 @@
  * and add notes, a post-processing agent can read it as-is, and
  * `ticket-parser import` reads it back (src/ticket_parser/markdown_export.py).
  * Keep the two in step: the `<!-- msg {...} -->` marker, the `> Note:`
- * blocks, the ```document fence, the media/ links, the ⚠️ lines and the
- * backslash escaping below are the contract between them.
+ * blocks, the ```document fences, the media/ links (a `![📄 …]` one being a
+ * picture from inside the document, at its place between the fences), the
+ * ⚠️ lines and the backslash escaping below are the contract between them.
  *
  * Loaded by popup.html only (an extension page), which is why pdf.js can run
  * here with its worker: content scripts cannot load one.
@@ -74,8 +75,32 @@ async function readZipEntry(bytes, wanted) {
 }
 
 const WORD_NS = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+const DRAWING_NS = 'http://schemas.openxmlformats.org/drawingml/2006/main';
+const RELS_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+const VML_NS = 'urn:schemas-microsoft-com:vml';
 
-function wordParagraphText(paragraph) {
+// A figure's place in extracted text: a line of its own holding this mark,
+// N indexing the figures array. buildExport turns it into an image line.
+const FIGURE_MARK = (n) => `\u0000figure:${n}\u0000`;
+const FIGURE_LINE = /^\u0000figure:(\d+)\u0000$/;
+// What a browser, the PDF renderer and the model can all show. (EMF/WMF
+// vector pictures from Word are none of those, and are left out.)
+const SHOWABLE_IMAGES = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp' };
+const MAX_FIGURES = 40;
+const MAX_PAGE_SNAPSHOTS = 30;
+const PAGE_SNAPSHOT_SCALE = 1.5;
+
+function posixJoin(base, target) {
+  const parts = `${base}/${target}`.split('/');
+  const out = [];
+  for (const part of parts) {
+    if (part === '..') out.pop();
+    else if (part && part !== '.') out.push(part);
+  }
+  return out.join('/');
+}
+
+function wordParagraphText(paragraph, ctx) {
   let text = '';
   const walk = (node) => {
     for (const child of node.children) {
@@ -90,6 +115,10 @@ function wordParagraphText(paragraph) {
         case 'br':
         case 'cr':
           text += '\n';
+          break;
+        case 'drawing':
+        case 'pict':
+          text += ctx.markFigure(child);
           break;
         case 'pPr':
         case 'rPr':
@@ -106,43 +135,112 @@ function wordParagraphText(paragraph) {
   return isListItem && text.trim() ? `- ${text}` : text;
 }
 
-function wordBlockText(container) {
+function wordBlockText(container, ctx) {
   const blocks = [];
   for (const child of container.children) {
     if (child.namespaceURI !== WORD_NS) continue;
     if (child.localName === 'p') {
-      blocks.push(wordParagraphText(child));
+      blocks.push(wordParagraphText(child, ctx));
     } else if (child.localName === 'tbl') {
       for (const row of child.getElementsByTagNameNS(WORD_NS, 'tr')) {
         const cells = [...row.children]
           .filter((cell) => cell.localName === 'tc')
-          .map((cell) => wordBlockText(cell).replace(/\n+/g, ' ').trim());
+          .map((cell) => wordBlockText(cell, ctx).replace(/\n+/g, ' ').trim());
         blocks.push(`| ${cells.join(' | ')} |`);
       }
     } else if (child.localName === 'sdt') {
       const content = child.getElementsByTagNameNS(WORD_NS, 'sdtContent')[0];
-      if (content) blocks.push(wordBlockText(content));
+      if (content) blocks.push(wordBlockText(content, ctx));
     }
   }
   return blocks.join('\n');
 }
 
-async function docxText(bytes) {
+/** Text of a .docx, with its pictures as figures at their place in it. */
+async function docxContent(bytes) {
   const xml = await readZipEntry(bytes, 'word/document.xml');
   if (!xml) throw new Error('no word/document.xml inside');
-  const doc = new DOMParser().parseFromString(new TextDecoder().decode(xml), 'application/xml');
+  const parse = (data) => new DOMParser().parseFromString(new TextDecoder().decode(data), 'application/xml');
+  const doc = parse(xml);
   const body = doc.getElementsByTagNameNS(WORD_NS, 'body')[0];
   if (!body) throw new Error('unreadable document.xml');
-  return wordBlockText(body);
+
+  // Relationship id -> path inside the zip ("word/media/image1.png").
+  const targets = new Map();
+  const relsXml = await readZipEntry(bytes, 'word/_rels/document.xml.rels');
+  if (relsXml) {
+    for (const rel of parse(relsXml).getElementsByTagName('Relationship')) {
+      if (rel.getAttribute('TargetMode') === 'External') continue;
+      targets.set(rel.getAttribute('Id'), posixJoin('word', rel.getAttribute('Target') || ''));
+    }
+  }
+
+  // Figures are found while walking the text; their bytes are read after.
+  const pending = [];
+  const ctx = {
+    markFigure(node) {
+      const blip = node.getElementsByTagNameNS(DRAWING_NS, 'blip')[0];
+      const imagedata = node.getElementsByTagNameNS(VML_NS, 'imagedata')[0];
+      const relId = blip ? blip.getAttributeNS(RELS_NS, 'embed') : imagedata ? imagedata.getAttributeNS(RELS_NS, 'id') : '';
+      const target = targets.get(relId);
+      const ext = target ? (target.match(/\.([A-Za-z0-9]+)$/) || [])[1] : '';
+      if (!target || !SHOWABLE_IMAGES[(ext || '').toLowerCase()] || pending.length >= MAX_FIGURES) return '';
+      pending.push({ target, ext: ext.toLowerCase() });
+      return `\n${FIGURE_MARK(pending.length - 1)}\n`;
+    },
+  };
+  const text = wordBlockText(body, ctx);
+
+  const figures = [];
+  for (const [index, { target, ext }] of pending.entries()) {
+    const data = await readZipEntry(bytes, target);
+    figures.push(
+      data
+        ? { bytes: data, extension: ext === 'jpeg' ? '.jpg' : `.${ext}`, mimetype: SHOWABLE_IMAGES[ext], label: `figure ${index + 1}` }
+        : null
+    );
+  }
+  return { text, figures };
 }
 
-/** The PDF's text layer. No OCR: a scanned PDF simply has none. */
-async function pdfText(bytes) {
+function canvasToBytes(canvas, type, quality) {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob(
+      (blob) => (blob ? blob.arrayBuffer().then((b) => resolve(new Uint8Array(b)), reject) : reject(new Error('could not encode the page'))),
+      type,
+      quality
+    );
+  });
+}
+
+/**
+ * The PDF's text layer, plus a picture of every page that has images on it.
+ *
+ * No OCR: a scanned PDF has no text -- but its pages are images, so they are
+ * captured as pictures, which a person and the model can both read. A picture
+ * of the whole page rather than the images pulled out of it: inside a PDF an
+ * "image" is often tiles, masks or a vector drawing, while the rendered page
+ * is exactly what the reader saw.
+ */
+async function pdfContent(bytes) {
   const pdfjs = window.pdfjsLib;
   if (!pdfjs) throw new Error('pdf.js did not load');
   pdfjs.GlobalWorkerOptions.workerSrc = 'vendor/pdf.worker.min.js';
-  const pdf = await pdfjs.getDocument({ data: bytes, isEvalSupported: false, disableFontFace: true }).promise;
+  const pdf = await pdfjs.getDocument({
+    data: bytes,
+    isEvalSupported: false,
+    disableFontFace: true,
+    // The 14 standard PDF fonts (Helvetica…) are often not embedded; without
+    // these, text would be missing from the page pictures.
+    standardFontDataUrl: 'vendor/standard_fonts/',
+  }).promise;
+  const imageOps = new Set(
+    ['paintImageXObject', 'paintInlineImageXObject', 'paintImageMaskXObject', 'paintImageXObjectRepeat', 'paintInlineImageXObjectGroup']
+      .map((name) => pdfjs.OPS[name])
+      .filter((op) => op !== undefined)
+  );
   const pages = [];
+  const figures = [];
   try {
     for (let number = 1; number <= pdf.numPages; number += 1) {
       const page = await pdf.getPage(number);
@@ -153,35 +251,92 @@ async function pdfText(bytes) {
         text += item.str;
         if (item.hasEOL) text += '\n';
       }
-      pages.push(text.trim());
+      text = text.trim();
+
+      if (figures.length < MAX_PAGE_SNAPSHOTS) {
+        const ops = await page.getOperatorList();
+        if (ops.fnArray.some((fn) => imageOps.has(fn))) {
+          try {
+            const viewport = page.getViewport({ scale: PAGE_SNAPSHOT_SCALE });
+            const canvas = document.createElement('canvas');
+            canvas.width = Math.ceil(viewport.width);
+            canvas.height = Math.ceil(viewport.height);
+            const context = canvas.getContext('2d');
+            context.fillStyle = '#fff';
+            context.fillRect(0, 0, canvas.width, canvas.height);
+            await page.render({ canvasContext: context, viewport }).promise;
+            figures.push({ bytes: await canvasToBytes(canvas, 'image/jpeg', 0.85), extension: '.jpg', mimetype: 'image/jpeg', label: `page ${number}` });
+            text += `\n${FIGURE_MARK(figures.length - 1)}`;
+          } catch (err) {
+            console.warn('[ticket-parser] could not take a picture of PDF page', number, err);
+          }
+        }
+      }
+      page.cleanup();
+      if (text.trim()) pages.push(text.trim());
     }
   } finally {
     pdf.destroy();
   }
-  return pages.filter(Boolean).join('\n\n');
+  return { text: pages.join('\n\n'), figures };
 }
 
 /**
- * Plain text of a document, or '' when it has none we can read.
+ * Text and figures of a document: { text, figures, error }. Text holds a
+ * FIGURE_MARK line where each figure goes. Empty for a type we do not read.
  * Never throws: a document we cannot read is still linked in the export.
  */
-async function extractDocumentText(doc) {
+async function extractDocumentContent(doc) {
   const name = String(doc.filename || '').toLowerCase();
   const bytes = base64ToBytes(doc.base64);
   const isPdf = name.endsWith('.pdf') || /pdf/.test(doc.mimetype || '') || bytes[0] === 0x25;
   try {
-    let text = '';
-    if (isPdf) text = await pdfText(bytes);
-    else if (name.endsWith('.docx') || /wordprocessingml/.test(doc.mimetype || '')) text = await docxText(bytes);
-    else if (/\.(txt|md|csv|log|json|xml)$/.test(name)) text = new TextDecoder().decode(bytes);
-    else return { text: '', error: '' };
+    let content;
+    if (isPdf) content = await pdfContent(bytes);
+    else if (name.endsWith('.docx') || /wordprocessingml/.test(doc.mimetype || '')) content = await docxContent(bytes);
+    else if (/\.(txt|md|csv|log|json|xml)$/.test(name)) content = { text: new TextDecoder().decode(bytes), figures: [] };
+    else return { text: '', figures: [], error: '' };
 
-    text = text.replace(/\r\n?/g, '\n').replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+    let text = content.text
+      .replace(/\r\n?/g, '\n')
+      .replace(/[ \t]*(\u0000figure:\d+\u0000)[ \t]*/g, '\n$1\n')
+      .replace(/[ \t]+\n/g, '\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
     if (text.length > MAX_DOCUMENT_TEXT) text = `${text.slice(0, MAX_DOCUMENT_TEXT)}\n[… truncated]`;
-    return { text, error: '' };
+    return { text, figures: content.figures, error: '' };
   } catch (err) {
-    return { text: '', error: String(err && err.message ? err.message : err) };
+    return { text: '', figures: [], error: String(err && err.message ? err.message : err) };
   }
+}
+
+/** Plain text only (figures dropped). */
+async function extractDocumentText(doc) {
+  const { text, error } = await extractDocumentContent(doc);
+  return { text: text.replace(/^\u0000figure:\d+\u0000$\n?/gm, '').replace(/\n{3,}/g, '\n\n').trim(), error };
+}
+
+/** [{ text } | { figure }] in document order. */
+function documentSegments(text, figures) {
+  const out = [];
+  let chunk = [];
+  const flush = () => {
+    const joined = chunk.join('\n').replace(/^\n+|\n+$/g, '');
+    if (joined.trim()) out.push({ text: joined });
+    chunk = [];
+  };
+  for (const line of text.split('\n')) {
+    const mark = line.match(FIGURE_LINE);
+    if (!mark) {
+      chunk.push(line);
+      continue;
+    }
+    flush();
+    const figure = figures[Number(mark[1])];
+    if (figure) out.push({ figure });
+  }
+  flush();
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -250,6 +405,7 @@ async function buildExport(messages, { exportedAt = new Date(), report = () => {
   const sections = [];
   const authors = new Set();
   let documentsRead = 0;
+  let figuresRead = 0;
   const notices = [];
 
   for (const message of messages) {
@@ -287,17 +443,40 @@ async function buildExport(messages, { exportedAt = new Date(), report = () => {
       body.push(`[📄 ${name.replace(/[[\]]/g, '')}](${path})`);
 
       report(`reading ${name}…`);
-      const { text: docText, error } = await extractDocumentText(message.document);
-      if (docText) {
-        documentsRead += 1;
-        const fence = fenceFor(docText);
-        body.push(`${fence}document\n${docText}\n${fence}`);
-      } else if (error) {
+      const { text: docText, figures, error } = await extractDocumentContent(message.document);
+      // Text in ```document fences, each picture from inside the document as
+      // an image line at its place between them (markdown_export.py reads
+      // the 📄 to tell it from a WhatsApp screenshot).
+      const stem = path.replace(/\.[^./]+$/, '');
+      let figureCount = 0;
+      let hasText = false;
+      for (const segment of documentSegments(docText, figures)) {
+        if (segment.text) {
+          hasText = true;
+          const fence = fenceFor(segment.text);
+          body.push(`${fence}document\n${segment.text}\n${fence}`);
+        } else {
+          figureCount += 1;
+          const figurePath = `${stem}-fig${figureCount}${segment.figure.extension}`;
+          files.push({ path: figurePath, bytes: segment.figure.bytes, mimetype: segment.figure.mimetype });
+          body.push(`![📄 ${segment.figure.label}](${figurePath})`);
+        }
+      }
+      figuresRead += figureCount;
+      if (hasText) documentsRead += 1;
+      if (error) {
         body.push(`⚠️ could not read the text of "${name}": ${error}`);
         notices.push({ level: 'warning', title: `Could not read "${name}"`, detail: `${error}. The file itself is still in the export.` });
-      } else if (/\.pdf$/i.test(name) || /pdf/.test(message.document.mimetype || '')) {
-        // No text and no error: a scanned PDF. No OCR, by design.
-        notices.push({ level: 'info', title: `"${name}" has no text`, detail: 'Probably a scan (there is no OCR); only the file is linked.' });
+      } else if (!hasText && (/\.pdf$/i.test(name) || /pdf/.test(message.document.mimetype || ''))) {
+        // No text: a scanned PDF. No OCR, by design -- but its pages are
+        // images, so they were captured as pictures above.
+        notices.push({
+          level: 'info',
+          title: `"${name}" has no text`,
+          detail: figureCount
+            ? `Probably a scan (there is no OCR); its ${figureCount} page(s) are included as pictures.`
+            : 'Probably a scan (there is no OCR); only the file is linked.',
+        });
       }
     }
 
@@ -327,7 +506,7 @@ async function buildExport(messages, { exportedAt = new Date(), report = () => {
 
   const title = `# WhatsApp — ${[...authors].join(', ') || 'conversation'} — ${span}`;
   const markdown = `${frontMatter}\n\n${title}\n\n${EDIT_GUIDE}\n\n${sections.join('\n\n')}\n`;
-  return { markdown, files, documentsRead, notices };
+  return { markdown, files, documentsRead, figuresRead, notices };
 }
 
 function exportName(messages, exportedAt = new Date()) {

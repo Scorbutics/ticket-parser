@@ -59,6 +59,7 @@ class ClaudeRunner(Protocol):
         timeout: int | None = None,
         label: str = "",
         model: str = "",
+        extra_dirs: Sequence[Path] = (),
     ) -> ClaudeResult: ...
 
 
@@ -101,6 +102,7 @@ class SubprocessClaudeRunner:
         timeout: int | None = None,
         label: str = "",
         model: str = "",
+        extra_dirs: Sequence[Path] = (),
     ) -> ClaudeResult:
         import time
 
@@ -108,6 +110,10 @@ class SubprocessClaudeRunner:
             raise ClaudeError(f"`{self.binary}` not found on PATH")
 
         argv = self._argv(prompt, allowed_tools, model)
+        if extra_dirs:
+            # Folders outside cwd the read-only tools may open: the batch's
+            # screenshots and document figures, so the model can look at them.
+            argv += ["--add-dir", *(str(d) for d in extra_dirs)]
         started = time.monotonic()
         try:
             proc = subprocess.run(
@@ -211,6 +217,7 @@ class FakeClaudeRunner:
         timeout: int | None = None,
         label: str = "",
         model: str = "",
+        extra_dirs: Sequence[Path] = (),
     ) -> ClaudeResult:
         self.calls.append(
             {
@@ -219,6 +226,7 @@ class FakeClaudeRunner:
                 "allowed_tools": tuple(allowed_tools),
                 "label": label,
                 "model": model,
+                "extra_dirs": tuple(extra_dirs),
             }
         )
         if self.error is not None:
